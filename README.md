@@ -16,6 +16,7 @@
 </p>
 
 <p align="center">
+  <a href="README_EN.md">English</a> ·
   <a href="#功能亮点">功能亮点</a> ·
   <a href="#使用说明">使用说明</a> ·
   <a href="https://github.com/huaxx-lab/mnemo/releases">下载</a> ·
