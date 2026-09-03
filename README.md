@@ -5,7 +5,7 @@
 <h1 align="center">Mnemo</h1>
 
 <p align="center">
-  把 MacBook 的刘海变成一层记得住、找得回的收纳：拖进去的东西会被读懂，说人话就能取回来。
+  什么东西都能往 MacBook 的刘海里扔。想找的时候，用自然语言提要求就行。
 </p>
 
 <p align="center">
