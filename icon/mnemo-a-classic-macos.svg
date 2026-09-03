@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="face" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FCF8F1"/><stop offset="1" stop-color="#EDE4D5"/>
+    </linearGradient>
+    <linearGradient id="arm" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#27346F"/><stop offset="1" stop-color="#141B3C"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="castShadow" x="-25%" y="-15%" width="150%" height="150%">
+      <feDropShadow dx="0" dy="24" stdDeviation="15" flood-color="#0A1226" flood-opacity=".32"/>
+    </filter>
+    <clipPath id="faceClip">
+      <rect x="0" y="0" width="1024" height="1024" rx="224" ry="224"/>
+    </clipPath>
+  </defs>
+
+  <g transform="translate(100,100) scale(0.804688)" filter="url(#castShadow)">
+    <rect x="0" y="0" width="1024" height="1024" rx="224" ry="224" fill="url(#face)"/>
+    <g clip-path="url(#faceClip)">
+      <rect x="0" y="0" width="1024" height="532.48" fill="url(#sheen)"/>
+      <path d="M250,195 V530 A262,262 0 0 0 774,530 V195" fill="none" stroke="url(#arm)" stroke-width="148"
+            stroke-linecap="butt" stroke-linejoin="round"/>
+      <rect x="176.0" y="195" width="148" height="148" fill="#F2A33C"/>
+      <rect x="700.0" y="195" width="148" height="148" fill="#F2A33C"/>
+      <circle cx="512" cy="267" r="108" fill="#1F2A5C"/>
+    </g>
+    <rect x="3" y="3" width="1018" height="1018" rx="221" ry="221"
+          fill="none" stroke="#FFFFFF" stroke-opacity="0.72" stroke-width="6"/>
+  </g>
+</svg>

@@ -1,0 +1,240 @@
+<title>Mnemo 图标方案</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<style>
+:root{
+  --ground:#EEF0F6; --surface:#FFFFFF; --surface-2:#F6F7FB; --line:#DDE0EA;
+  --ink:#14161F; --ink-2:#4B5163; --ink-3:#787E92;
+  --accent:#2B44A6; --accent-soft:#E7EAF8;
+  --cream:#EDE4D2; --red:#E2483A; --cobalt:#2B44A6; --notch:#17171A;
+  --dock-glass:rgba(255,255,255,.62); --dock-line:rgba(20,22,31,.10);
+  --shadow:0 1px 2px rgba(20,22,31,.05), 0 12px 32px -12px rgba(20,22,31,.16);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ground:#0E1017; --surface:#171A23; --surface-2:#1E222D; --line:#2B3040;
+    --ink:#EDEEF3; --ink-2:#A7ADBE; --ink-3:#767D91;
+    --accent:#7E93F0; --accent-soft:#20263C;
+    --dock-glass:rgba(255,255,255,.07); --dock-line:rgba(255,255,255,.10);
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 14px 36px -14px rgba(0,0,0,.7);
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0E1017; --surface:#171A23; --surface-2:#1E222D; --line:#2B3040;
+  --ink:#EDEEF3; --ink-2:#A7ADBE; --ink-3:#767D91;
+  --accent:#7E93F0; --accent-soft:#20263C;
+  --dock-glass:rgba(255,255,255,.07); --dock-line:rgba(255,255,255,.10);
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 14px 36px -14px rgba(0,0,0,.7);
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--ground); color:var(--ink);
+  font-family:"IBM Plex Sans","PingFang SC","Hiragino Sans GB",system-ui,sans-serif;
+  font-size:16px; line-height:1.65; -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1080px; margin:0 auto; padding:56px 24px 96px; display:flex; flex-direction:column; gap:56px}
+.mono{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
+
+/* --- icon rendering ------------------------------------------------- */
+.ico{display:block; background-size:contain; background-repeat:no-repeat; background-position:center; flex:none}
+.ico-a{background-image:url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDI0IDEwMjQiIHdpZHRoPSIxMDI0IiBoZWlnaHQ9IjEwMjQiPgogIDxkZWZzPgogICAgPGxpbmVhckdyYWRpZW50IGlkPSJmYWNlIiB4MT0iMCIgeTE9IjAiIHgyPSIwIiB5Mj0iMSI+CiAgICAgIDxzdG9wIG9mZnNldD0iMCIgc3RvcC1jb2xvcj0iI0ZDRjhGMSIvPjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iI0VERTRENSIvPgogICAgPC9saW5lYXJHcmFkaWVudD4KICAgIDxsaW5lYXJHcmFkaWVudCBpZD0iYXJtIiB4MT0iMCIgeTE9IjAiIHgyPSIwIiB5Mj0iMSI+CiAgICAgIDxzdG9wIG9mZnNldD0iMCIgc3RvcC1jb2xvcj0iIzI3MzQ2RiIvPjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzE0MUIzQyIvPgogICAgPC9saW5lYXJHcmFkaWVudD4KICAgIDxsaW5lYXJHcmFkaWVudCBpZD0ic2hlZW4iIHgxPSIwIiB5MT0iMCIgeDI9IjAiIHkyPSIxIj4KICAgICAgPHN0b3Agb2Zmc2V0PSIwIiBzdG9wLWNvbG9yPSIjZmZmIiBzdG9wLW9wYWNpdHk9IjAuNTUiLz4KICAgICAgPHN0b3Agb2Zmc2V0PSIxIiBzdG9wLWNvbG9yPSIjZmZmIiBzdG9wLW9wYWNpdHk9IjAiLz4KICAgIDwvbGluZWFyR3JhZGllbnQ+CiAgICA8ZmlsdGVyIGlkPSJjYXN0U2hhZG93IiB4PSItMjUlIiB5PSItMTUlIiB3aWR0aD0iMTUwJSIgaGVpZ2h0PSIxNTAlIj4KICAgICAgPGZlRHJvcFNoYWRvdyBkeD0iMCIgZHk9IjI0IiBzdGREZXZpYXRpb249IjE1IiBmbG9vZC1jb2xvcj0iIzBBMTIyNiIgZmxvb2Qtb3BhY2l0eT0iLjMyIi8+CiAgICA8L2ZpbHRlcj4KICAgIDxjbGlwUGF0aCBpZD0iZmFjZUNsaXAiPgogICAgICA8cmVjdCB4PSIwIiB5PSIwIiB3aWR0aD0iMTAyNCIgaGVpZ2h0PSIxMDI0IiByeD0iMjI0IiByeT0iMjI0Ii8+CiAgICA8L2NsaXBQYXRoPgogIDwvZGVmcz4KCiAgPGcgdHJhbnNmb3JtPSJ0cmFuc2xhdGUoMTAwLDEwMCkgc2NhbGUoMC44MDQ2ODgpIiBmaWx0ZXI9InVybCgjY2FzdFNoYWRvdykiPgogICAgPHJlY3QgeD0iMCIgeT0iMCIgd2lkdGg9IjEwMjQiIGhlaWdodD0iMTAyNCIgcng9IjIyNCIgcnk9IjIyNCIgZmlsbD0idXJsKCNmYWNlKSIvPgogICAgPGcgY2xpcC1wYXRoPSJ1cmwoI2ZhY2VDbGlwKSI+CiAgICAgIDxyZWN0IHg9IjAiIHk9IjAiIHdpZHRoPSIxMDI0IiBoZWlnaHQ9IjUzMi40OCIgZmlsbD0idXJsKCNzaGVlbikiLz4KICAgICAgPHBhdGggZD0iTTI1MCwxOTUgVjUzMCBBMjYyLDI2MiAwIDAgMCA3NzQsNTMwIFYxOTUiIGZpbGw9Im5vbmUiIHN0cm9rZT0idXJsKCNhcm0pIiBzdHJva2Utd2lkdGg9IjE0OCIKICAgICAgICAgICAgc3Ryb2tlLWxpbmVjYXA9ImJ1dHQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz4KICAgICAgPHJlY3QgeD0iMTc2LjAiIHk9IjE5NSIgd2lkdGg9IjE0OCIgaGVpZ2h0PSIxNDgiIGZpbGw9IiNGMkEzM0MiLz4KICAgICAgPHJlY3QgeD0iNzAwLjAiIHk9IjE5NSIgd2lkdGg9IjE0OCIgaGVpZ2h0PSIxNDgiIGZpbGw9IiNGMkEzM0MiLz4KICAgICAgPGNpcmNsZSBjeD0iNTEyIiBjeT0iMjY3IiByPSIxMDgiIGZpbGw9IiMxRjJBNUMiLz4KICAgIDwvZz4KICAgIDxyZWN0IHg9IjMiIHk9IjMiIHdpZHRoPSIxMDE4IiBoZWlnaHQ9IjEwMTgiIHJ4PSIyMjEiIHJ5PSIyMjEiCiAgICAgICAgICBmaWxsPSJub25lIiBzdHJva2U9IiNGRkZGRkYiIHN0cm9rZS1vcGFjaXR5PSIwLjcyIiBzdHJva2Utd2lkdGg9IjYiLz4KICA8L2c+Cjwvc3ZnPgo=")}
+.ico-b{background-image:url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDI0IDEwMjQiIHdpZHRoPSIxMDI0IiBoZWlnaHQ9IjEwMjQiPgogIDxkZWZzPgogICAgPGxpbmVhckdyYWRpZW50IGlkPSJmYWNlIiB4MT0iMCIgeTE9IjAiIHgyPSIwIiB5Mj0iMSI+CiAgICAgIDxzdG9wIG9mZnNldD0iMCIgc3RvcC1jb2xvcj0iIzE3MUEyMiIvPjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzA1MDYwQSIvPgogICAgPC9saW5lYXJHcmFkaWVudD4KICAgIDxsaW5lYXJHcmFkaWVudCBpZD0iYXJtIiB4MT0iMCIgeTE9IjAiIHgyPSIwIiB5Mj0iMSI+CiAgICAgIDxzdG9wIG9mZnNldD0iMCIgc3RvcC1jb2xvcj0iIzNCRTNDNiIvPjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzNBNzJGNSIvPgogICAgPC9saW5lYXJHcmFkaWVudD4KICAgIDxsaW5lYXJHcmFkaWVudCBpZD0ic2hlZW4iIHgxPSIwIiB5MT0iMCIgeDI9IjAiIHkyPSIxIj4KICAgICAgPHN0b3Agb2Zmc2V0PSIwIiBzdG9wLWNvbG9yPSIjZmZmIiBzdG9wLW9wYWNpdHk9IjAuMSIvPgogICAgICA8c3RvcCBvZmZzZXQ9IjEiIHN0b3AtY29sb3I9IiNmZmYiIHN0b3Atb3BhY2l0eT0iMCIvPgogICAgPC9saW5lYXJHcmFkaWVudD4KICAgIDxmaWx0ZXIgaWQ9ImNhc3RTaGFkb3ciIHg9Ii0yNSUiIHk9Ii0xNSUiIHdpZHRoPSIxNTAlIiBoZWlnaHQ9IjE1MCUiPgogICAgICA8ZmVEcm9wU2hhZG93IGR4PSIwIiBkeT0iMjQiIHN0ZERldmlhdGlvbj0iMTUiIGZsb29kLWNvbG9yPSIjMEExMjI2IiBmbG9vZC1vcGFjaXR5PSIuMzIiLz4KICAgIDwvZmlsdGVyPgogICAgPGNsaXBQYXRoIGlkPSJmYWNlQ2xpcCI+CiAgICAgIDxyZWN0IHg9IjAiIHk9IjAiIHdpZHRoPSIxMDI0IiBoZWlnaHQ9IjEwMjQiIHJ4PSIyMjQiIHJ5PSIyMjQiLz4KICAgIDwvY2xpcFBhdGg+CiAgPC9kZWZzPgoKICA8ZyB0cmFuc2Zvcm09InRyYW5zbGF0ZSgxMDAsMTAwKSBzY2FsZSgwLjgwNDY4OCkiIGZpbHRlcj0idXJsKCNjYXN0U2hhZG93KSI+CiAgICA8cmVjdCB4PSIwIiB5PSIwIiB3aWR0aD0iMTAyNCIgaGVpZ2h0PSIxMDI0IiByeD0iMjI0IiByeT0iMjI0IiBmaWxsPSJ1cmwoI2ZhY2UpIi8+CiAgICA8ZyBjbGlwLXBhdGg9InVybCgjZmFjZUNsaXApIj4KICAgICAgPHJlY3QgeD0iMCIgeT0iMCIgd2lkdGg9IjEwMjQiIGhlaWdodD0iNTMyLjQ4IiBmaWxsPSJ1cmwoI3NoZWVuKSIvPgogICAgICA8cGF0aCBkPSJNMjUwLDE5NSBWNTMwIEEyNjIsMjYyIDAgMCAwIDc3NCw1MzAgVjE5NSIgZmlsbD0ibm9uZSIgc3Ryb2tlPSJ1cmwoI2FybSkiIHN0cm9rZS13aWR0aD0iMTQ4IgogICAgICAgICAgICBzdHJva2UtbGluZWNhcD0iYnV0dCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPgogICAgICA8cmVjdCB4PSIxNzYuMCIgeT0iMTk1IiB3aWR0aD0iMTQ4IiBoZWlnaHQ9IjE0OCIgZmlsbD0iI0ZGQzE1RSIvPgogICAgICA8cmVjdCB4PSI3MDAuMCIgeT0iMTk1IiB3aWR0aD0iMTQ4IiBoZWlnaHQ9IjE0OCIgZmlsbD0iI0ZGQzE1RSIvPgogICAgICA8Y2lyY2xlIGN4PSI1MTIiIGN5PSIyNjciIHI9IjEwOCIgZmlsbD0iI0Y0RjFFQSIvPgogICAgPC9nPgogICAgPHJlY3QgeD0iMyIgeT0iMyIgd2lkdGg9IjEwMTgiIGhlaWdodD0iMTAxOCIgcng9IjIyMSIgcnk9IjIyMSIKICAgICAgICAgIGZpbGw9Im5vbmUiIHN0cm9rZT0iI0ZGRkZGRiIgc3Ryb2tlLW9wYWNpdHk9IjAuMTYiIHN0cm9rZS13aWR0aD0iNiIvPgogIDwvZz4KPC9zdmc+Cg==")}
+.ico-c{background-image:url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDI0IDEwMjQiIHdpZHRoPSIxMDI0IiBoZWlnaHQ9IjEwMjQiPgogIDxkZWZzPgogICAgPGxpbmVhckdyYWRpZW50IGlkPSJmYWNlIiB4MT0iMCIgeTE9IjAiIHgyPSIwIiB5Mj0iMSI+CiAgICAgIDxzdG9wIG9mZnNldD0iMCIgc3RvcC1jb2xvcj0iIzBDMEQxMCIvPjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzA2MDcwOSIvPgogICAgPC9saW5lYXJHcmFkaWVudD4KICAgIDxsaW5lYXJHcmFkaWVudCBpZD0iYXJtIiB4MT0iMCIgeTE9IjAiIHgyPSIwIiB5Mj0iMSI+CiAgICAgIDxzdG9wIG9mZnNldD0iMCIgc3RvcC1jb2xvcj0iI0Y0RjFFQSIvPjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iI0Q1RDBDNCIvPgogICAgPC9saW5lYXJHcmFkaWVudD4KICAgIDxsaW5lYXJHcmFkaWVudCBpZD0ic2hlZW4iIHgxPSIwIiB5MT0iMCIgeDI9IjAiIHkyPSIxIj4KICAgICAgPHN0b3Agb2Zmc2V0PSIwIiBzdG9wLWNvbG9yPSIjZmZmIiBzdG9wLW9wYWNpdHk9IjAuMDgiLz4KICAgICAgPHN0b3Agb2Zmc2V0PSIxIiBzdG9wLWNvbG9yPSIjZmZmIiBzdG9wLW9wYWNpdHk9IjAiLz4KICAgIDwvbGluZWFyR3JhZGllbnQ+CiAgICA8ZmlsdGVyIGlkPSJjYXN0U2hhZG93IiB4PSItMjUlIiB5PSItMTUlIiB3aWR0aD0iMTUwJSIgaGVpZ2h0PSIxNTAlIj4KICAgICAgPGZlRHJvcFNoYWRvdyBkeD0iMCIgZHk9IjI0IiBzdGREZXZpYXRpb249IjE1IiBmbG9vZC1jb2xvcj0iIzBBMTIyNiIgZmxvb2Qtb3BhY2l0eT0iLjMyIi8+CiAgICA8L2ZpbHRlcj4KICAgIDxjbGlwUGF0aCBpZD0iZmFjZUNsaXAiPgogICAgICA8cmVjdCB4PSIwIiB5PSIwIiB3aWR0aD0iMTAyNCIgaGVpZ2h0PSIxMDI0IiByeD0iMjI0IiByeT0iMjI0Ii8+CiAgICA8L2NsaXBQYXRoPgogIDwvZGVmcz4KCiAgPGcgdHJhbnNmb3JtPSJ0cmFuc2xhdGUoMTAwLDEwMCkgc2NhbGUoMC44MDQ2ODgpIiBmaWx0ZXI9InVybCgjY2FzdFNoYWRvdykiPgogICAgPHJlY3QgeD0iMCIgeT0iMCIgd2lkdGg9IjEwMjQiIGhlaWdodD0iMTAyNCIgcng9IjIyNCIgcnk9IjIyNCIgZmlsbD0idXJsKCNmYWNlKSIvPgogICAgPGcgY2xpcC1wYXRoPSJ1cmwoI2ZhY2VDbGlwKSI+CiAgICAgIDxyZWN0IHg9IjAiIHk9IjAiIHdpZHRoPSIxMDI0IiBoZWlnaHQ9IjUzMi40OCIgZmlsbD0idXJsKCNzaGVlbikiLz4KICAgICAgPHBhdGggZD0iTTI1MCwxOTUgVjUzMCBBMjYyLDI2MiAwIDAgMCA3NzQsNTMwIFYxOTUiIGZpbGw9Im5vbmUiIHN0cm9rZT0idXJsKCNhcm0pIiBzdHJva2Utd2lkdGg9IjE0OCIKICAgICAgICAgICAgc3Ryb2tlLWxpbmVjYXA9ImJ1dHQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz4KICAgICAgPHJlY3QgeD0iMTc2LjAiIHk9IjE5NSIgd2lkdGg9IjE0OCIgaGVpZ2h0PSIxNDgiIGZpbGw9IiM4RjhBN0MiLz4KICAgICAgPHJlY3QgeD0iNzAwLjAiIHk9IjE5NSIgd2lkdGg9IjE0OCIgaGVpZ2h0PSIxNDgiIGZpbGw9IiM4RjhBN0MiLz4KICAgICAgPGNpcmNsZSBjeD0iNTEyIiBjeT0iMjY3IiByPSIxMDgiIGZpbGw9IiNGNEYxRUEiLz4KICAgIDwvZz4KICAgIDxyZWN0IHg9IjMiIHk9IjMiIHdpZHRoPSIxMDE4IiBoZWlnaHQ9IjEwMTgiIHJ4PSIyMjEiIHJ5PSIyMjEiCiAgICAgICAgICBmaWxsPSJub25lIiBzdHJva2U9IiNGRkZGRkYiIHN0cm9rZS1vcGFjaXR5PSIwLjE0IiBzdHJva2Utd2lkdGg9IjYiLz4KICA8L2c+Cjwvc3ZnPgo=")}
+
+/* --- header ---------------------------------------------------------- */
+header{display:flex; gap:28px; align-items:center; flex-wrap:wrap}
+header .ico{width:104px; height:104px}
+.eyebrow{font-size:12px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-3); font-weight:600}
+h1{margin:.15em 0 .1em; font-size:34px; line-height:1.2; font-weight:700; letter-spacing:-.02em; text-wrap:balance}
+header p{margin:0; color:var(--ink-2); max-width:56ch}
+
+h2{font-size:13px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-3); font-weight:600; margin:0 0 18px}
+section{display:block}
+
+/* --- variant cards ---------------------------------------------------- */
+.variants{display:grid; grid-template-columns:repeat(auto-fit,minmax(268px,1fr)); gap:20px}
+.card{
+  background:var(--surface); border:1px solid var(--line); border-radius:18px;
+  padding:26px 24px 24px; box-shadow:var(--shadow); display:flex; flex-direction:column; gap:16px;
+}
+.card.pick{border-color:var(--accent)}
+.card .ico{width:132px; height:132px; margin:0 auto}
+.card h3{margin:0; font-size:19px; font-weight:600; letter-spacing:-.01em; display:flex; align-items:center; gap:10px; flex-wrap:wrap}
+.tag{font-size:11px; font-weight:600; letter-spacing:.06em; padding:3px 9px; border-radius:999px;
+     background:var(--accent-soft); color:var(--accent); text-transform:uppercase}
+.card p{margin:0; font-size:14.5px; color:var(--ink-2)}
+.card .file{margin-top:auto; padding-top:14px; border-top:1px solid var(--line); font-size:12.5px; color:var(--ink-3)}
+
+/* --- size proof ------------------------------------------------------- */
+.proof{display:grid; grid-template-columns:1fr 1fr; gap:20px}
+.plate{border-radius:18px; border:1px solid var(--line); padding:28px 24px 20px; box-shadow:var(--shadow); overflow-x:auto}
+.plate.light{background:#F0F1F5}
+.plate.dark{background:#1B1D26; border-color:#2B3040}
+.strip{display:flex; align-items:flex-end; gap:22px; min-width:max-content}
+.unit{display:flex; flex-direction:column; align-items:center; gap:10px}
+.unit span{font-size:11px; color:#8A90A2}
+.plate.dark .unit span{color:#8E94A6}
+.s16 .ico{width:16px;height:16px} .s32 .ico{width:32px;height:32px}
+.s64 .ico{width:64px;height:64px} .s128 .ico{width:128px;height:128px}
+.plate-label{font-size:12px; color:#8A90A2; margin:16px 0 0; letter-spacing:.04em}
+
+/* --- dock ------------------------------------------------------------- */
+.stage{
+  border-radius:20px; padding:64px 24px 26px; border:1px solid var(--line); box-shadow:var(--shadow);
+  background:linear-gradient(160deg,#2E52C9 0%,#1B2E86 52%,#122058 100%);
+  display:flex; justify-content:center;
+}
+.dock{
+  display:flex; gap:14px; align-items:flex-end; padding:10px 14px; border-radius:22px;
+  background:rgba(255,255,255,.20); border:1px solid rgba(255,255,255,.28);
+  backdrop-filter:blur(12px);
+}
+.dock .ico{width:60px; height:60px}
+.slot{width:60px; height:60px; border-radius:14px; flex:none}
+
+/* --- spec tables ------------------------------------------------------ */
+.cols{display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:20px}
+table{width:100%; border-collapse:collapse; font-size:14px}
+.tablewrap{background:var(--surface); border:1px solid var(--line); border-radius:16px; overflow:hidden; box-shadow:var(--shadow)}
+.tablewrap > div{overflow-x:auto}
+.cap{text-align:left; padding:16px 20px 0; font-size:12px; letter-spacing:.12em; text-transform:uppercase; color:var(--ink-3); font-weight:600}
+th,td{text-align:left; padding:11px 20px; border-bottom:1px solid var(--line); white-space:nowrap}
+tbody tr:last-child td{border-bottom:none}
+th{font-size:11.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--ink-3); font-weight:600}
+td.num{font-variant-numeric:tabular-nums; color:var(--ink-2)}
+.sw{display:inline-block; width:13px; height:13px; border-radius:4px; vertical-align:-2px; margin-right:9px; border:1px solid rgba(127,127,127,.28)}
+
+.note{font-size:14.5px; color:var(--ink-2); max-width:66ch; margin:0}
+.note strong{color:var(--ink); font-weight:600}
+footer{border-top:1px solid var(--line); padding-top:22px; font-size:13.5px; color:var(--ink-3)}
+@media (max-width:720px){ .proof{grid-template-columns:1fr} h1{font-size:27px} }
+</style>
+
+<div class="wrap">
+
+<header>
+  <div class="ico ico-a" role="img" aria-label="Mnemo 图标"></div>
+  <div>
+    <div class="eyebrow">App Icon · macOS</div>
+    <h1>Mnemo 图标方案</h1>
+    <p>照参考稿重做：白面、刘海是黑色胶囊、三张卡片从刘海下缘露出来。三个方案差别只在卡片和面色，几何骨架完全一致。</p>
+  </div>
+</header>
+
+<section>
+  <h2>三个方案</h2>
+  <div class="variants">
+    <div class="card">
+      <div class="ico ico-a"></div>
+      <h3>A · 齐平</h3>
+      <p>忠于参考稿。三张卡片等长，构图最安静，也最像一个"收纳格"。</p>
+      <p class="file mono">mnemo-a-classic.icns</p>
+    </div>
+    <div class="card pick">
+      <div class="ico ico-b"></div>
+      <h3>B · 错落 <span class="tag">推荐</span></h3>
+      <p>卡片长短错开，红色最长。有动势，而且 16px 下三张卡片仍能分辨——A 在这个尺寸会糊成一条。</p>
+      <p class="file mono">mnemo-b-staggered.icns</p>
+    </div>
+    <div class="card">
+      <div class="ico ico-c"></div>
+      <h3>C · 深色面</h3>
+      <p>面色转深灰，刘海靠纯黑加边光区分。彩色卡片跳出来更狠，但刘海的"黑"读不出来了。</p>
+      <p class="file mono">mnemo-c-dark.icns</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>真实尺寸检验</h2>
+  <div class="proof">
+    <div class="plate light">
+      <div class="strip">
+        <div class="unit s16"><div class="ico ico-b"></div><span>16</span></div>
+        <div class="unit s32"><div class="ico ico-b"></div><span>32</span></div>
+        <div class="unit s64"><div class="ico ico-b"></div><span>64</span></div>
+        <div class="unit s128"><div class="ico ico-b"></div><span>128</span></div>
+      </div>
+      <p class="plate-label">浅色 · 访达列表 / 侧边栏 / 菜单栏</p>
+    </div>
+    <div class="plate dark">
+      <div class="strip">
+        <div class="unit s16"><div class="ico ico-b"></div><span>16</span></div>
+        <div class="unit s32"><div class="ico ico-b"></div><span>32</span></div>
+        <div class="unit s64"><div class="ico ico-b"></div><span>64</span></div>
+        <div class="unit s128"><div class="ico ico-b"></div><span>128</span></div>
+      </div>
+      <p class="plate-label">深色 · 同一套 icns 自动适配</p>
+    </div>
+  </div>
+  <p class="note" style="margin-top:16px">16px 是底线尺寸——菜单栏和访达列表都用它。白面在深色壁纸上会亮得跳眼，这是好事：Dock 里一眼能找到。</p>
+</section>
+
+<section>
+  <h2>Dock 实景</h2>
+  <div class="stage">
+    <div class="dock">
+      <div class="slot" style="background:linear-gradient(150deg,#5B6474,#39404E)"></div>
+      <div class="slot" style="background:linear-gradient(150deg,#4EA3E8,#2C6FC4)"></div>
+      <div class="ico ico-b"></div>
+      <div class="slot" style="background:linear-gradient(150deg,#E9B84A,#D3902A)"></div>
+      <div class="slot" style="background:linear-gradient(150deg,#7BC98A,#3F9B5B)"></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>设计规格</h2>
+  <div class="cols">
+    <div class="tablewrap">
+      <div class="cap">色值</div>
+      <div><table>
+        <thead><tr><th>用处</th><th>Hex</th></tr></thead>
+        <tbody>
+          <tr><td><span class="sw" style="background:#17171A"></span>刘海</td><td class="num mono">#313134 → #17171A</td></tr>
+          <tr><td><span class="sw" style="background:#EDE4D2"></span>卡片 · 米</td><td class="num mono">#EDE4D2</td></tr>
+          <tr><td><span class="sw" style="background:#E2483A"></span>卡片 · 朱红</td><td class="num mono">#E2483A</td></tr>
+          <tr><td><span class="sw" style="background:#2B44A6"></span>卡片 · 钴蓝</td><td class="num mono">#2B44A6</td></tr>
+          <tr><td><span class="sw" style="background:#F7F5F0"></span>面</td><td class="num mono">#FFFFFF → #EFEBE2</td></tr>
+        </tbody>
+      </table></div>
+    </div>
+    <div class="tablewrap">
+      <div class="cap">几何 · 1024 画布</div>
+      <div><table>
+        <thead><tr><th>元素</th><th>数值</th></tr></thead>
+        <tbody>
+          <tr><td>面 · 圆角</td><td class="num mono">224</td></tr>
+          <tr><td>刘海 · 宽 × 高</td><td class="num mono">620 × 216</td></tr>
+          <tr><td>刘海 · 顶边距</td><td class="num mono">230</td></tr>
+          <tr><td>卡片 · 宽 / 间距</td><td class="num mono">150 / 26</td></tr>
+          <tr><td>卡片 · 底圆角</td><td class="num mono">75（半圆）</td></tr>
+          <tr><td>macOS 安全区</td><td class="num mono">824 居中于 1024</td></tr>
+        </tbody>
+      </table></div>
+    </div>
+  </div>
+  <p class="note" style="margin-top:16px">卡片顶边是直角，藏在刘海后面；只有底部是半圆。所以放大看是"卡片塞进刘海"，而不是三根挂在下面的柱子——这个细节撑着整个隐喻。</p>
+</section>
+
+<section>
+  <h2>交付文件</h2>
+  <div class="tablewrap">
+    <div><table>
+      <thead><tr><th>路径</th><th>用途</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">icon/pinland-{方案}.svg</td><td>满幅矢量原稿，改色改比例从这里改</td></tr>
+        <tr><td class="mono">icon/pinland-{方案}-macos.svg</td><td>824 安全区 + 投影，App 图标用这版</td></tr>
+        <tr><td class="mono">icon/pinland-{方案}-macos.png</td><td>1024 位图</td></tr>
+        <tr><td class="mono">icon/build/pinland-{方案}.icns</td><td>全尺寸图标包，直接拖进 Xcode</td></tr>
+        <tr><td class="mono">icon/src/gen_icon.py</td><td>生成脚本，改几何和配色的唯一入口</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+</section>
+
+<footer>三个方案共用一套几何。要调比例、加第四张卡片、或换品牌色，改 <span class="mono">gen_icon.py</span> 顶部的常量后重跑即可。</footer>
+
+</div>
