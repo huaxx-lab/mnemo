@@ -257,19 +257,46 @@ extension UpdateCoordinator: URLSessionDownloadDelegate {
         downloadTask: URLSessionDownloadTask,
         didFinishDownloadingTo location: URL
     ) {
+        // 必须在这个方法**返回之前**同步搬走文件。
+        //
+        // URLSession 的契约：didFinishDownloadingTo 一返回，location 那个临时
+        // 文件立刻被系统删掉。旧代码把 moveItem 包进 Task 里，方法当场返回、
+        // 文件先被删，Task 再去搬就只剩
+        // "couldn't be moved … the former doesn't exist"。
+        let outcome = Self.persistDownloadedDMG(from: location)
         Task { @MainActor in
-            let destination = FileManager.default.temporaryDirectory
-                .appending(path: "mnemo-update-\(UUID().uuidString).dmg")
-            do {
-                // location 在回调返回后就被系统清掉，先挪到自己的目录。
-                try FileManager.default.moveItem(at: location, to: destination)
-                self.downloadTask = nil
-                self.downloadSession?.finishTasksAndInvalidate()
-                self.downloadSession = nil
-                self.install(dmg: destination)
-            } catch {
+            self.downloadTask = nil
+            self.downloadSession?.finishTasksAndInvalidate()
+            self.downloadSession = nil
+            switch outcome {
+            case .success(let url):
+                self.install(dmg: url)
+            case .failure(let error):
                 self.phase = .failed("下载文件保存失败：\(error.localizedDescription)")
             }
+        }
+    }
+
+    /// 存进「下载」目录，和用户在浏览器里下东西的位置一致：安装失败时他能
+    /// 自己找到那个 DMG 手动装，而不是在一个随机临时目录里凭空消失。
+    /// 目录不可用（极少见）才退回临时目录。
+    nonisolated private static func persistDownloadedDMG(from location: URL) -> Result<URL, any Error> {
+        let fileManager = FileManager.default
+        let downloads = (try? fileManager.url(
+            for: .downloadsDirectory, in: .userDomainMask, appropriateFor: nil, create: true
+        )) ?? fileManager.temporaryDirectory
+        var destination = downloads.appending(path: "Mnemo-Update.dmg")
+        // 不覆盖用户已有的同名文件。
+        var index = 2
+        while fileManager.fileExists(atPath: destination.path) {
+            destination = downloads.appending(path: "Mnemo-Update-\(index).dmg")
+            index += 1
+        }
+        do {
+            try fileManager.moveItem(at: location, to: destination)
+            return .success(destination)
+        } catch {
+            return .failure(error)
         }
     }
 

@@ -13,7 +13,7 @@ struct UpdateWindow: View {
             content
             footer
         }
-        .frame(width: 460, height: 420)
+        .frame(width: 480, height: 520)
     }
 
     private var header: some View {
@@ -125,15 +125,24 @@ struct UpdateWindow: View {
                     .font(.system(size: 11, weight: .bold, design: .monospaced))
                     .foregroundStyle(Color.accentColor)
             }
+            // 发布说明是 Markdown。用纯 Text 渲染的话，`##` 和 `-` 会原样
+            // 显示成符号，读起来像没排版的源码。复用应用里已有的 MarkdownText
+            // （标题、列表、行内格式、代码块都支持）。
             ScrollView {
-                Text(release.notes.isEmpty ? release.title : release.notes)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
+                MarkdownText(
+                    raw: release.notes.isEmpty ? release.title : release.notes,
+                    font: .system(size: 12)
+                )
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxWidth: .infinity)
-            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+            .frame(maxWidth: .infinity, minHeight: 150)
+            .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(.quaternary.opacity(0.6))
+            }
         }
         .padding(.horizontal, 22)
         .padding(.vertical, 14)

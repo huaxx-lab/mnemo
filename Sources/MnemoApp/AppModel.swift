@@ -5393,7 +5393,20 @@ final class AppModel {
                     if self.knownInvalidLinkPageIDs.remove(id) != nil {
                         self.persistKnownInvalidLinkPages()
                     }
-                    self.clearLinkReparseAttempt(id)
+                    if wasManual {
+                        // 用户自己按的重新解析：清零，让后续自动补抓仍有额度。
+                        self.clearLinkReparseAttempt(id)
+                    } else if wasForced {
+                        // 自动补抓**成功**了——这一版解析器对这条链接的结果就是
+                        // 这样。可"最长段落 < 120 字"这条启发式判的是"看着像没
+                        // 抓到正文"，控制台页、定价页、视频页本来就没有长段落，
+                        // 抓成功后依旧满足它。原来在这里清零计数，于是下次开机
+                        // 同一批链接又被选中：绿点每次开机都转一圈，抓的全是已经
+                        // 抓好的页面，"每条最多试三次"对成功的条目从未生效。
+                        // 记满次数把它摘出候选，等 linkExtractionRevision 变了
+                        // 整表清空时再统一重来。
+                        self.saturateLinkReparseAttempt(id)
+                    }
                     self.removePendingIndex(id)
                     if wasForced, let refreshed = try? await self.library.item(id: id) {
                         // 正文先成功，再抓封面。取消同 ID 可能还在排队的旧元数据
@@ -5636,6 +5649,15 @@ final class AppModel {
         item.embeddingModelID = nil
         item.indexedAt = nil
         try? await library.replaceChunks(for: itemID, with: keep, updating: item)
+    }
+
+    /// 记满自动补抓次数：这条链接在当前解析版本下不必再被启发式选中。
+    private func saturateLinkReparseAttempt(_ itemID: UUID) {
+        var attempts = (UserDefaults.standard.dictionary(forKey: Self.linkReparseAttemptsKey)
+            as? [String: Int]) ?? [:]
+        guard attempts[itemID.uuidString, default: 0] < Self.linkReparseMaxAttempts else { return }
+        attempts[itemID.uuidString] = Self.linkReparseMaxAttempts
+        UserDefaults.standard.set(attempts, forKey: Self.linkReparseAttemptsKey)
     }
 
     private func clearLinkReparseAttempt(_ itemID: UUID) {
