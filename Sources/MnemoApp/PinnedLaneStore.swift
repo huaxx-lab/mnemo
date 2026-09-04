@@ -22,14 +22,19 @@ enum PinnedLaneStore {
 
     static func contains(_ id: UUID) -> Bool { ordered.contains(id) }
 
-    /// 钉住。`before` 为 nil 时排到这一段的末尾。
-    static func pin(_ id: UUID, before target: UUID?) {
+    /// 钉住。`target` 为 nil 时排到这一段的末尾。
+    ///
+    /// `after` 不能省：落在某张钉住卡片的**右缘**时，插入点是它后面那一格，
+    /// 而不是整段的末尾。之前把这种情况当成"没有锚点"，卡片会越过后面所有
+    /// 钉住的卡直接甩到队尾——和用户眼前那根插入竖线差着好几格。
+    static func pin(_ id: UUID, anchor target: UUID?, after: Bool = false) {
         ordered.removeAll { $0 == id }
-        if let target, let index = ordered.firstIndex(of: target) {
-            ordered.insert(id, at: index)
-        } else {
+        guard let target, let index = ordered.firstIndex(of: target) else {
             ordered.append(id)
+            persist()
+            return
         }
+        ordered.insert(id, at: after ? index + 1 : index)
         persist()
     }
 

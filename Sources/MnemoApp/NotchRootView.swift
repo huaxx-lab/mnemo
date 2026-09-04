@@ -1511,7 +1511,7 @@ private struct PinBoundaryDropDelegate: DropDelegate {
         model.draggingItemID = nil
         // 钉到最前面那一格，而不是钉住区的末尾——用户刚把它拖到了最左边。
         withAnimation(.spring(response: 0.32, dampingFraction: 0.78)) {
-            model.pinToFront(id, before: model.pinnedLaneIDs.first)
+            model.pinToFront(id, anchor: model.pinnedLaneIDs.first)
         }
         return true
     }
@@ -1565,7 +1565,7 @@ private struct PinBoundary: View {
                 //
                 // 命中区一直在，看不看得见是另一回事：用户往左拖过第一张卡
                 // 就会碰到它，碰到的那一刻才亮——这正是"到了那个位置才显示"。
-                .padding(.horizontal, isDraggingSomething ? 9 : 0)
+                .padding(.horizontal, isDraggingSomething ? 14 : 0)
                 .contentShape(Rectangle())
 
         }
@@ -1608,7 +1608,20 @@ private struct CardGroupDropDelegate: DropDelegate {
     /// 一个心智模型——松手的位置决定发生什么。
     private static let mergeZone: ClosedRange<CGFloat> = 0.3...0.7
 
-    private var width: CGFloat { PinCard.width + 20 }
+    /// 这一组画出来到底多宽。
+    ///
+    /// 之前写死 196：折叠时真实宽度是 183 或 190，展开三张时是 592。
+    /// 于是"中段"被算到了 x∈[59,137]——那是竖脊和第一张卡的左三分之一，
+    /// 离视觉中心差着几百点，用户往组中间放怎么都合不进去。
+    private var width: CGFloat {
+        guard isExpanded else { return PinCard.width + CGFloat(sheetCount) * 7 }
+        return 12 + 28 + 8 + CGFloat(memberCount) * PinCard.width
+            + 8 * CGFloat(max(0, memberCount - 1))
+    }
+
+    private var memberCount: Int { group.itemIDs.count }
+    private var sheetCount: Int { min(2, max(1, memberCount - 1)) }
+    private var isExpanded: Bool { model.expandedCardGroups.contains(group.id) }
 
     private func canMerge(_ x: CGFloat) -> Bool {
         guard model.draggingGroupID == nil, let draggedID,
@@ -1737,6 +1750,11 @@ private struct PinReorderDropDelegate: DropDelegate {
     @Binding var insertAfter: Bool
     /// 松手就会合并的那张卡。指针停在中段时点亮它。
     @Binding var mergeTargetID: UUID?
+    /// 版本合集只排序不合并——它代表的是"同一份文档的几版"，再往里塞一张
+    /// 别的东西没有意义。
+    var allowsMerge = true
+    /// 这一格的**真实**宽度。分区判定按比例算，写死一个数就会算错位置。
+    var width: CGFloat = PinCard.width
     let perform: (UUID, UUID, Bool) -> Void
 
     private var draggedID: UUID? { model.draggingItemID }
@@ -1753,7 +1771,7 @@ private struct PinReorderDropDelegate: DropDelegate {
     private static let mergeZone: ClosedRange<CGFloat> = 0.34...0.66
 
     private func isMergePosition(_ x: CGFloat) -> Bool {
-        Self.mergeZone.contains(x / PinCard.width)
+        allowsMerge && Self.mergeZone.contains(x / width)
     }
 
     /// 能不能合。整组不能被拖进别的组，见 `AppModel.mergeCards`。
@@ -1771,7 +1789,7 @@ private struct PinReorderDropDelegate: DropDelegate {
     private static let flipBackward: CGFloat = 0.38
 
     private func resolvedInsertAfter(_ x: CGFloat) -> Bool {
-        let ratio = x / PinCard.width
+        let ratio = x / width
         return insertAfter
             ? ratio >= Self.flipBackward      // 已经在右边，退够了才回左边
             : ratio > Self.flipForward        // 已经在左边，进够了才去右边
@@ -1781,7 +1799,7 @@ private struct PinReorderDropDelegate: DropDelegate {
         guard validateDrop(info: info) else { return }
         reorderTargetID = targetID
         // 刚进来时还没有"上一次"可参考，用中线定初值。
-        insertAfter = info.location.x > PinCard.width / 2
+        insertAfter = info.location.x > width / 2
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
@@ -1851,6 +1869,8 @@ private struct StashWorkspace: View {
     @State private var isDetachingFromGroup = false
     @State private var boundaryHighlight: BoundaryHighlight = .none
     @State private var isOverPinBoundary = false
+    /// 上一帧已经"稳定"在哪个页签上。切换的那一帧两者不等，动画让位。
+    @State private var animatedTab: AppModel.Tab?
     @State private var platformRowExpanded = false
     @State private var folderRowExpanded = false
     @State private var edgeScrollTask: Task<Void, Never>?
@@ -1953,6 +1973,43 @@ private struct StashWorkspace: View {
                                     )
                                     .id(collection.id)
                                     .transition(.opacity)
+                                    // 版本合集也得接住投放。没有这一句时，
+                                    // 落在它身上的拖拽会穿过去砸到轨道背景那层
+                                    // "离开当前区"上——用户想把卡片插到版本堆
+                                    // 旁边，实际发生的却是"移出分组"或"取消钉住"，
+                                    // 而且卡片纹丝不动。
+                                    .onDrop(
+                                        of: [UTType.data],
+                                        delegate: PinReorderDropDelegate(
+                                            targetID: collection.id,
+                                            canReorder: canReorderCards,
+                                            model: model,
+                                            reorderTargetID: $reorderTargetID,
+                                            insertAfter: $reorderInsertAfter,
+                                            mergeTargetID: $mergeTargetID,
+                                            allowsMerge: false,
+                                            width: PinCard.width + 14,
+                                            perform: { draggedID, anchorID, after in
+                                                withAnimation(
+                                                    .spring(response: 0.3, dampingFraction: 0.8)
+                                                ) {
+                                                    model.moveCard(
+                                                        draggedID, anchor: anchorID, after: after
+                                                    )
+                                                }
+                                            }
+                                        )
+                                    )
+                                    .overlay(alignment: .leading) {
+                                        if reorderTargetID == collection.id, !reorderInsertAfter {
+                                            insertionIndicator.offset(x: -5.5)
+                                        }
+                                    }
+                                    .overlay(alignment: .trailing) {
+                                        if reorderTargetID == collection.id, reorderInsertAfter {
+                                            insertionIndicator.offset(x: 5.5)
+                                        }
+                                    }
                                 case .cardGroup(let group, let members):
                                     CardGroupAccordion(
                                         group: group,
@@ -1973,12 +2030,12 @@ private struct StashWorkspace: View {
                                             radius: Style.cardRadius + 4,
                                             label: "放进「\(group.name)」"
                                         )
-                                        .animation(
-                                            .spring(response: 0.22, dampingFraction: 0.75),
-                                            value: mergeTargetID == group.id
-                                        )
                                     }
                                     .scaleEffect(mergeTargetID == group.id ? 1.03 : 1)
+                                    .animation(
+                                        .spring(response: 0.24, dampingFraction: 0.72),
+                                        value: mergeTargetID == group.id
+                                    )
                                     .onDrop(
                                         of: [UTType.data],
                                         delegate: CardGroupDropDelegate(
@@ -2029,14 +2086,15 @@ private struct StashWorkspace: View {
                                     // 挂在卡片上时，合并高亮一变，卡片里所有
                                     // 可动的属性（缩略图、文字、底栏图标）都被
                                     // 一起卷进这条 spring，那是抖动的来源。
-                                    .overlay {
-                                        MergeHalo(active: mergeTargetID == item.id)
-                                            .animation(
-                                                .spring(response: 0.22, dampingFraction: 0.75),
-                                                value: mergeTargetID == item.id
-                                            )
-                                    }
+                                    .overlay { MergeHalo(active: mergeTargetID == item.id) }
                                     .scaleEffect(mergeTargetID == item.id ? 1.04 : 1)
+                                    // 放大和光环要在**同一个**作用域里。上一版把
+                                    // 动画塞进了 overlay 的闭包，只罩住光环，
+                                    // 而放大在外面——于是它是硬跳的。
+                                    .animation(
+                                        .spring(response: 0.24, dampingFraction: 0.72),
+                                        value: mergeTargetID == item.id
+                                    )
                                     // 残影修复：拖拽副本跟着指针走时，原位那张保持全亮，
                                     // 两张叠着看就是"残影"。拖进列表范围后把原位压暗。
                                     .opacity(isLiftedSource ? 0.25 : 1)
@@ -2102,14 +2160,7 @@ private struct StashWorkspace: View {
                     // "滚到第一张"会把那 12pt 一起滚出视野，第一张直接贴住左边，
                     // 和平时的间距对不上——双击标题栏跳回开头就会看到这个。
                     .contentMargins(.horizontal, 12, for: .scrollContent)
-                    // 切页签换的是一整批内容，不是"这几张动了动"。
-                    //
-                    // 不给它换身份的话，SwiftUI 会拿新旧两批卡片做逐张 diff：
-                    // 十几张同时淡出、另十几张同时缩放淡入，还都挂在同一条
-                    // 换位动画上——那就是切页签时看到的抖动。整条轨道换个
-                    // id，让它整体交叉淡出，一帧的活。
-                    .id(model.activeTab)
-                    .transition(.opacity)
+
                     // 「拖到空白处 = 离开当前的区」这一层必须铺满整条轨道，
                     // 而不是贴在卡片那一排的背景上——那个背景正好就是卡片本身
                     // 的大小，右边那片真正的空白根本不在它的范围里，怎么拖都
@@ -2148,13 +2199,19 @@ private struct StashWorkspace: View {
                 .frame(height: isAnswering ? cardTrackHeight : nil)
                 .frame(maxHeight: isAnswering ? nil : .infinity)
                 // 触发值用一个 Int，不用每帧新建 UUID 数组去比。
-                // 换位靠 spring 而不是 smooth：smooth 是匀速收尾，几张卡同时
-                // 挪动时看着像一起"滑"过去；spring 有初速和阻尼，读起来才是
-                // 被推开的。
+                //
+                // 切页签那一帧不给动画：换页签换的是一整批内容，不是"这几张
+                // 动了动"。让它走同一条 spring 的话，十几张同时淡出、另十几张
+                // 同时弹入，全叠在一条曲线上——那就是切页签时看到的抖动。
+                // 换位靠 spring 而不是 smooth：smooth 匀速收尾，几张卡一起挪
+                // 看着像整体"滑"过去；spring 有初速和阻尼，才读得出是被推开的。
                 .animation(
-                    .spring(response: 0.34, dampingFraction: 0.86),
+                    model.activeTab == animatedTab
+                        ? .spring(response: 0.34, dampingFraction: 0.86)
+                        : nil,
                     value: model.visibleOrderRevision
                 )
+                .onChange(of: model.activeTab) { _, tab in animatedTab = tab }
                 // 手风琴：旧版本进出轨道要有推开 / 合拢的过程。直接出现和
                 // 直接消失会让人以为卡片被删了或者凭空多了几张。
                 .animation(
@@ -2185,9 +2242,17 @@ private struct StashWorkspace: View {
     /// 投放——真正的落点判定仍然归卡片上的 `PinReorderDropDelegate`。
     @ViewBuilder
     private func edgeScroller(proxy: ScrollViewProxy, forward: Bool) -> some View {
+        // 左边这条感应带要给钉住边界让路。
+        //
+        // 它是 ScrollView 的 overlay，盖在内容前面，34pt 宽正好压住轨道最左边
+        // ——而钉住边界也在那儿。结果是：拖到最左边永远只会触发自动翻页，
+        // 钉住那一下的投放一次都没到达过（UserDefaults 里那个键从来没被写过）。
+        //
+        // 往里让 26pt：翻页只在更外侧那一条窄带上触发，而"往左拖到底想钉住"
+        // 落在边界自己身上。右边不需要让，那里没有别的投放目标。
         if model.visibleItems.count > 3 {
             Color.clear
-                .frame(width: 34)
+                .frame(width: forward ? 34 : 8)
                 .contentShape(Rectangle())
                 .onDrop(
                     of: [UTType.data],
@@ -3786,7 +3851,9 @@ private struct VersionAccordion: View {
     }
 
     /// 探出来的宽度。悬停时多探一点，像被手指拨开一条缝。
-    private var peek: CGFloat { hovering ? 9 : 7 }
+    private var peek: CGFloat { hovering ? 9 : Self.restTileX }
+    /// 布局用的静止值，见下面外框那句注释。
+    private static let restTileX: CGFloat = 7
 
     /// 后面画几张纸边。最多两张：第三张开始已经看不出区别，只是把边缘弄花。
     private var sheetDepths: [Int] { Array(1...min(2, max(1, members.count - 1))) }

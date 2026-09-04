@@ -894,7 +894,9 @@ final class AppModel {
     ///
     /// 只列库里真有的：把四十个平台全摆出来、其中三十七个点进去是空的，
     /// 那不是筛选器，是一排噪音。
-    var availableLinkGroups: [LinkGroup] {
+    var availableLinkGroups: [LinkGroup] { filterRow().links }
+
+    private var computedLinkGroups: [LinkGroup] {
         guard case .kind(.link) = activeTab else { return [] }
         var counts: [LinkGroup: Int] = [:]
         // 隐私条目不参与计数：藏起来就是藏起来。X 的最后一条进了隐私空间，
@@ -921,7 +923,7 @@ final class AppModel {
 
     /// 这条 Pin 属于哪个分组。卡片徽标和筛选条读同一个判定。
     func linkGroup(of item: Item) -> LinkGroup? {
-        guard let url = item.linkURL else { return nil }
+        guard let url = linkURL(of: item) else { return nil }
         if let platform = LinkPlatform.resolve(url) { return .platform(platform) }
         guard let host = url.host(), !host.isEmpty else { return nil }
         return .domain(RegistrableDomain.of(host))
@@ -1098,12 +1100,12 @@ final class AppModel {
     ///
     /// 钉住的同时把它从分组里拿出来：分组是"这几张是一类"，钉住是"这一张我
     /// 现在一直要看"，一张卡不能同时被两套版式管——那样它到底画在哪儿没有答案。
-    func pinToFront(_ id: UUID, before target: UUID? = nil) {
+    func pinToFront(_ id: UUID, anchor target: UUID? = nil, after: Bool = false) {
         if cardGroup(of: id) != nil {
             CardGroupStore.detach(id)
             cardGroupGeneration &+= 1
         }
-        PinnedLaneStore.pin(id, before: target)
+        PinnedLaneStore.pin(id, anchor: target, after: after)
         pinnedLaneGeneration &+= 1
         showTransientFeedback("已钉到最前")
     }
@@ -1147,7 +1149,7 @@ final class AppModel {
             if draggedPinned {
                 movePinned(dragged, anchor: target, after: after)
             } else {
-                pinToFront(dragged, before: after ? nil : target)
+                pinToFront(dragged, anchor: target, after: after)
             }
             return
         }
@@ -1192,7 +1194,28 @@ final class AppModel {
     }
 
     /// 顶部一排里能点的分组：成员至少有一张还看得见。
-    var availableCardGroups: [CardGroup] {
+    /// 顶部那一排的内容。
+    ///
+    /// 缓存：`StashWorkspace.body` 里 `availableLinkGroups` 被读两次（一次
+    /// 决定页签高度、一次画那一排），每次都要把整份库过一遍并解析链接；
+    /// 而这个 body 在悬停、拖拽的每一次 `dropUpdated` 上都会重跑。
+    @ObservationIgnored private var filterRowCache: (
+        key: VisibleItemsKey, links: [LinkGroup], folders: [CardGroup]
+    )?
+
+    private func filterRow() -> (links: [LinkGroup], folders: [CardGroup]) {
+        let key = visibleItemsKey
+        if let filterRowCache, filterRowCache.key == key {
+            return (filterRowCache.links, filterRowCache.folders)
+        }
+        let value = (links: computedLinkGroups, folders: computedCardGroups)
+        filterRowCache = (key, value.links, value.folders)
+        return value
+    }
+
+    var availableCardGroups: [CardGroup] { filterRow().folders }
+
+    private var computedCardGroups: [CardGroup] {
         let visible = Set(visibleItemsIgnoringGroupFilter.map(\.id))
         return cardGroups.filter { group in group.itemIDs.contains { visible.contains($0) } }
     }
@@ -1228,6 +1251,14 @@ final class AppModel {
     func mergeCards(_ dragged: UUID, into target: UUID) {
         guard draggingGroupID == nil, cardGroup(of: dragged)?.id != cardGroup(of: target)?.id
                 || cardGroup(of: dragged) == nil else { return }
+        // 进组就得先出钉住区。"一张卡只属于一个区"以前只在钉住那一侧成立
+        // （`pinToFront` 会先出组），合并这一侧没做——结果是一张卡同时在
+        // 钉住区和分组里：整组被钉住区排到队首、拖不动（拖完立刻被重排回去），
+        // 而"移出分组"又只解开组不解开钉住，剩不下任何能取消钉住的手势。
+        for id in [dragged, target] where isPinnedToFront(id) {
+            PinnedLaneStore.unpin(id)
+            pinnedLaneGeneration &+= 1
+        }
         let existing = CardGroupStore.group(containing: target)
         let created = CardGroupStore.merge(dragged, into: target, defaultName: defaultGroupName())
         cardGroupGeneration &+= 1
@@ -1419,7 +1450,12 @@ final class AppModel {
                 result.append(.item(item))
                 continue
             }
-            guard let slot = slots[item.id] else {
+            // 钉住的卡片按它自己那一张画，不并进版本合集。
+            //
+            // 不挡的话会整张消失：钉住区把它排到了队首，而它在版本族里
+            // rank != 1，循环走到 `guard slot.rank == 1` 那一句直接 continue，
+            // 谁都没画它——用户看到的是"钉了一下，卡片不见了"。
+            guard let slot = slots[item.id], !isPinnedToFront(item.id) else {
                 result.append(.item(item))
                 continue
             }
@@ -1897,9 +1933,20 @@ final class AppModel {
     /// 必须保证它先读到，监听到的抬起事件再清。
     @ObservationIgnored private var dragEndMonitor: Any?
 
+    /// 这一次拖拽的编号。松手后的清理只能清掉**自己那一次**。
+    ///
+    /// 之前那个 150ms 的延迟清理既没存起来也没法取消：在有效目标外松手时
+    /// 没有任何 performDrop 会跑，于是清理被排上；用户紧接着抓起第二张卡开始
+    /// 拖，150ms 后旧任务把 `draggingItemID` 抹了——第二次拖动从此没有任何
+    /// 目标接得住（每个 validateDrop 都要求它非 nil），松手什么都不会发生。
+    @ObservationIgnored private var dragGeneration = 0
+
     func beginOutboundDrag(itemID: UUID) {
         dragCompletionTask?.cancel()
         dragCompletionTask = nil
+        dragGeneration &+= 1
+        // 上一次拖拽的残留标记必须在这里清掉，不能指望那个延迟任务。
+        draggingGroupID = nil
         draggingItemID = itemID
         if let monitor = dragEndMonitor {
             NSEvent.removeMonitor(monitor)
@@ -1911,12 +1958,15 @@ final class AppModel {
                 NSEvent.removeMonitor(monitor)
                 self.dragEndMonitor = nil
             }
+            let generation = self.dragGeneration
             Task { @MainActor [weak self] in
                 try? await Task.sleep(for: .milliseconds(150))
-                self?.draggingItemID = nil
-                // 组标记必须和卡片标记同生共死。松手落空时（拖到面板外、
-                // 中途取消）只清一个，下一次拖普通卡片就会被当成还在拖组。
-                self?.draggingGroupID = nil
+                // 期间又开始了新的一次拖拽，就不是我该清的了。
+                guard let self, self.dragGeneration == generation else { return }
+                self.draggingItemID = nil
+                // 组标记和卡片标记同生共死。只清一个的话，下一次拖普通卡片
+                // 会被当成还在拖组。
+                self.draggingGroupID = nil
             }
             return event
         }

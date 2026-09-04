@@ -143,6 +143,14 @@ enum LinkOpener {
     ///
     /// 有多个时取第一个：系统按用户的默认设置排序，它比我们自己挑更合理。
     static func nativeApp(for url: URL) -> URL? {
+        let key = url.host() ?? url.absoluteString
+        if let cached = nativeAppCache[key] { return cached }
+        let resolved = resolvedNativeApp(for: url)
+        nativeAppCache[key] = resolved
+        return resolved
+    }
+
+    private static func resolvedNativeApp(for url: URL) -> URL? {
         NSWorkspace.shared.urlsForApplications(toOpen: url).first { appURL in
             guard let id = Bundle(url: appURL)?.bundleIdentifier else { return false }
             // 减去**所有**通用 http 处理器，不只是浏览器。留下的才是"专门认
@@ -180,10 +188,22 @@ enum LinkOpener {
         return "默认浏览器"
     }
 
+    /// 应用名。缓存住：卡片的悬停提示每帧都会重新算一遍"这条链接会去哪儿"，
+    /// 而 `displayName(atPath:)` 每次都要读一趟磁盘上的 bundle 信息。
+    private static var nameCache: [String: String] = [:]
+
     private static func appName(at url: URL) -> String {
-        FileManager.default.displayName(atPath: url.path)
+        if let cached = nameCache[url.path] { return cached }
+        let name = FileManager.default.displayName(atPath: url.path)
             .replacingOccurrences(of: ".app", with: "")
+        nameCache[url.path] = name
+        return name
     }
+
+    /// `urlsForApplications(toOpen:)` 是一次 Launch Services 往返，还要逐个
+    /// 读候选应用的 Info.plist。按主机名缓存——同一个域名的链接会落到同一个
+    /// App 上，而卡片轨道里同域名的链接往往是成片的。
+    private static var nativeAppCache: [String: URL?] = [:]
 }
 
 /// 这条链接当初是从哪个浏览器来的。
