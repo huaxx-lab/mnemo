@@ -164,6 +164,14 @@ public actor SwiftDataItemStore: ItemStore {
         }
     }
 
+    public func chunkItemIDs() throws -> Set<UUID> {
+        var seen: Set<UUID> = []
+        for chunk in try modelContext.fetch(FetchDescriptor<StoredContentChunk>()) {
+            seen.insert(chunk.itemID)
+        }
+        return seen
+    }
+
     public func deleteChunks(itemID: UUID) throws {
         let descriptor = FetchDescriptor<StoredContentChunk>(
             predicate: #Predicate { $0.itemID == itemID }

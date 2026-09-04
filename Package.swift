@@ -56,7 +56,11 @@ let package = Package(
                 "MnemoCore",
                 "MnemoStore",
                 .product(name: "ZIPFoundation", package: "ZIPFoundation"),
-            ]
+            ],
+            // 站点抽取的测试用**真实抓下来的页面**，不用手写的简化 HTML：
+            // 这类规则每次失败都是因为真实页面和想象中的不一样，简化样本
+            // 只会把同一个错误照抄进测试里。
+            resources: [.copy("Fixtures")]
         ),
     ]
 )

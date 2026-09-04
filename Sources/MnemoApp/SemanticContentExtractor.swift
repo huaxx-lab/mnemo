@@ -59,6 +59,28 @@ enum SemanticContentExtractor {
         }
     }
 
+    /// 对链接的首图跑 OCR。
+    ///
+    /// 小红书这类平台的内容常常**根本不在文字里**：正文一句"见图"，真正的
+    /// 信息全写在配图上。首图已经被 LinkCoverStore 下载并缓存成 PNG 了，
+    /// 复用它不需要再发一次网络请求。
+    ///
+    /// 用 imageOCR 这个 source，和截图走同一条路：召回时能说清楚"这句话是
+    /// 从图里读出来的"，也和现有的隐私、重建逻辑保持一致。
+    static func linkCoverChunks(
+        itemID: UUID,
+        coverURL: URL,
+        ordinalBase: Int
+    ) async -> [ContentChunk] {
+        await extractImage(itemID: itemID, url: coverURL, filename: "")
+            .enumerated()
+            .map { offset, chunk in
+                var value = chunk
+                value.ordinal = ordinalBase + offset
+                return value
+            }
+    }
+
     private static func extractPDF(itemID: UUID, url: URL) async -> [ContentChunk] {
         await Task.detached(priority: .utility) {
             guard let document = PDFDocument(url: url) else { return [] }

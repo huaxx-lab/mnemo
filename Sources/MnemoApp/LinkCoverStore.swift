@@ -13,7 +13,7 @@ enum LinkCoverStore {
     /// 卡片上最大也就 52pt，存 2x 足够；再大只是浪费磁盘和解码时间。
     private static let maximumPixelSize: CGFloat = 240
 
-    private static var directory: URL {
+    nonisolated private static var directory: URL {
         let root = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appending(path: "Pinland/link-covers", directoryHint: .isDirectory)
@@ -21,7 +21,9 @@ enum LinkCoverStore {
         return root
     }
 
-    static func url(for itemID: UUID) -> URL {
+    /// 纯路径计算，没有任何可变状态——索引那条并发链路要用它去读缓存好的
+    /// 封面文件，没必要为此跳一次主线程。
+    nonisolated static func url(for itemID: UUID) -> URL {
         directory.appending(path: "\(itemID.uuidString).png")
     }
 

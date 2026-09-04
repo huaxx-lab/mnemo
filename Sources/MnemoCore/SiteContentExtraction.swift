@@ -129,17 +129,19 @@ public enum SiteContentExtraction {
         }
 
 
-        public static func extract(fromHTML html: String) -> String? {
+        /// 读 `noteDetailMap` 之后第一个指定字段的 JSON 字符串值。
+        ///
+        /// 只在 noteDetailMap 后面找：页面状态里还有 UI、推荐流等一堆同名字段，
+        /// 拿全页第一个会把别的模块说明当成当前笔记的内容。手工扫到配对的
+        /// 引号，因为 JSON 字符串里可以有转义引号，不能直接找下一个 `"`。
+        static func noteField(_ key: String, in html: String) -> String? {
             guard html.contains("__INITIAL_STATE__"),
                   let noteRange = html.range(of: "\"noteDetailMap\"") else { return nil }
-            // 只在 noteDetailMap 后面找 desc。页面状态里还有 UI、推荐流等很多
-            // `desc` 字段，拿全页第一个会把别的模块说明当成当前笔记正文。
             let noteState = html[noteRange.lowerBound...]
             guard let range = noteState.range(
-                of: #""desc"\s*:\s*""#,
+                of: "\"\(key)\"\\s*:\\s*\"",
                 options: .regularExpression
             ) else { return nil }
-            // 手工扫到配对的引号：JSON 字符串里可以有转义引号，不能直接找下一个 "。
             var literal = "\""
             var index = range.upperBound
             var escaped = false
@@ -164,6 +166,138 @@ public enum SiteContentExtraction {
             }
             let text = decoded.trimmingCharacters(in: .whitespacesAndNewlines)
             return text.isEmpty ? nil : text
+        }
+
+        /// 话题标记。原文写作 `#考研人[话题]#`，`[话题]#` 是平台的内部记号，
+        /// 不是用户写的字。留着它检索时会把这四个字当成正文词一起匹配，
+        /// 而且读起来是坏的。词本身保留——那是这条笔记的主题。
+        public static func cleaned(_ text: String) -> String {
+            text.replacingOccurrences(
+                of: #"\[话题\]#"#,
+                with: " ",
+                options: .regularExpression
+            )
+            .replacingOccurrences(of: #"[ \t]+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        /// 笔记标题。
+        ///
+        /// 状态里的 `title` 才是作者填的标题；`<title>` 标签在没填标题时会被
+        /// 整段正文顶替（还带着 `#话题#` 和 ` - 小红书` 后缀），拿它当标题
+        /// 就是一张卡片上糊着一整段话，或者干脆退化成 AI 起名。
+        /// 作者没填标题时（小红书允许），按平台自己的做法取正文首句。
+        public static func title(fromHTML html: String) -> String? {
+            if let title = noteField("title", in: html) {
+                let cleanedTitle = cleaned(title)
+                if !cleanedTitle.isEmpty { return cleanedTitle }
+            }
+            guard let desc = extract(fromHTML: html) else { return nil }
+            return leadingSentence(of: desc)
+        }
+
+        /// 正文首句，用作没有标题时的替代。
+        ///
+        /// 按句子边界断，不按字数硬切——切在半个词上比长一点更难看。
+        /// 只有首句本身异常长时才退回在标点处收尾。
+        static func leadingSentence(of text: String) -> String? {
+            guard let line = text
+                .split(whereSeparator: \.isNewline)
+                .map({ $0.trimmingCharacters(in: .whitespaces) })
+                .first(where: { !$0.isEmpty })
+            else { return nil }
+            if line.count <= 50 { return line }
+            let breaks: Set<Character> = ["。", "！", "？", "，", "；", "、", ".", "!", "?", ","]
+            let head = line.prefix(50)
+            if let cut = head.lastIndex(where: { breaks.contains($0) }),
+               head.distance(from: head.startIndex, to: cut) >= 12 {
+                return String(head[..<cut])
+            }
+            return String(head)
+        }
+
+        public static func extract(fromHTML html: String) -> String? {
+            noteField("desc", in: html).map(cleaned)
+        }
+    }
+
+    /// GitHub 仓库页。
+    ///
+    /// 通用正文抽取在这里几乎没用：页面主体是文件树、导航和一堆按钮，
+    /// 真正有检索价值的 README 藏在 `article.markdown-body` 里，而标题
+    /// `GitHub - owner/repo: 描述 · GitHub` 前后各挂着一段平台样板。
+    ///
+    /// 不打 api.github.com：匿名 API 每小时只有 60 次，而 README 本来就
+    /// 随 HTML 一起发过来了，多一次请求既慢又会在批量补抓时撞限流。
+    public enum GitHub {
+        /// 是不是一个仓库主页。`/owner/repo`，两段路径，且第一段不是平台
+        /// 自己的功能页（settings、features、explore 之类）。
+        public static func isRepositoryPage(_ url: URL) -> Bool {
+            guard url.host()?.lowercased().hasSuffix("github.com") == true else { return false }
+            let parts = url.path().split(separator: "/").map(String.init)
+            guard parts.count == 2 else { return false }
+            let reserved: Set<String> = [
+                "settings", "features", "explore", "topics", "trending", "collections",
+                "events", "sponsors", "marketplace", "pricing", "about", "notifications",
+                "orgs", "users", "search", "login", "join", "apps", "codespaces",
+            ]
+            return !reserved.contains(parts[0].lowercased())
+        }
+
+        /// 仓库页的可检索内容 = 标题 + 描述 + README。
+        ///
+        /// README 按标题/段落/列表项切成 segments，让分块沿语义边界走：
+        /// 命中"怎么安装"时给回的是安装那一节，而不是横跨简介和许可证的
+        /// 一刀。找不到 README 时仍然返回描述——一个仓库连描述都没有的
+        /// 情况下，通用抽取给出的也只会是导航噪音。
+        public static func extract(fromHTML html: String, url: URL) -> LinkTextExtraction.Extracted? {
+            guard isRepositoryPage(url),
+                  let document = try? SwiftSoup.parse(html, url.absoluteString) else { return nil }
+            let heading = (try? document.title()).flatMap(title(fromDocumentTitle:))
+            let description = (try? document.select("meta[property=og:description]").first()?
+                .attr("content"))?
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) } ?? nil
+            // og:description 后面挂着一句固定的招募语，对检索毫无价值，
+            // 而且每个仓库都一样——留着会让所有 GitHub 链接的向量互相靠拢。
+            let cleanedDescription = description.map { value -> String in
+                guard let range = value.range(of: "Contribute to ") else { return value }
+                return String(value[..<range.lowerBound])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+
+            var segments: [String] = []
+            if let cleanedDescription, !cleanedDescription.isEmpty {
+                segments.append(cleanedDescription)
+            }
+            if let readme = try? document.select("article.markdown-body").first() {
+                let blocks = (try? readme.select("h1, h2, h3, h4, p, li, pre")) ?? Elements()
+                for element in blocks.array() {
+                    guard let text = try? element.text()
+                        .trimmingCharacters(in: .whitespacesAndNewlines),
+                        !text.isEmpty else { continue }
+                    segments.append(text)
+                }
+            }
+            guard !segments.isEmpty else { return nil }
+            return LinkTextExtraction.Extracted(
+                title: heading,
+                text: LinkTextExtraction.clamp(segments.joined(separator: "\n\n")),
+                summary: cleanedDescription,
+                segments: segments
+            )
+        }
+
+        /// 从仓库页标题里剥掉平台样板，留下 `owner/repo：描述`。
+        public static func title(fromDocumentTitle raw: String) -> String? {
+            var value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            for suffix in [" · GitHub", " - GitHub"] where value.hasSuffix(suffix) {
+                value = String(value.dropLast(suffix.count))
+            }
+            for prefix in ["GitHub - "] where value.hasPrefix(prefix) {
+                value = String(value.dropFirst(prefix.count))
+            }
+            value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return value.isEmpty ? nil : value
         }
     }
 }

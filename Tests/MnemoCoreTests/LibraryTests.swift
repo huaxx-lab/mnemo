@@ -664,3 +664,72 @@ func linkRefreshCommitsRAGAtomically() async throws {
     #expect(stored.indexedAt == Date(timeIntervalSince1970: 20))
     #expect(chunks.map(\.text) == ["《解读 DeepSeek Harness 的核心论文》\n#1 author：完整正文"])
 }
+
+@Suite("删除与 RAG 的一致性")
+struct DeletionRAGConsistencyTests {
+
+    private func makeLibrary() -> (Library, InMemoryItemStore) {
+        let store = InMemoryItemStore()
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "mnemo-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let vault = try! FileVault(root: root)
+        return (Library(store: store, vault: vault), store)
+    }
+
+    @Test("彻底删除一条时它的分块一起消失")
+    func purgeRemovesChunks() async throws {
+        let (library, store) = makeLibrary()
+        let item = Item(title: "会议纪要", kind: .text, holding: .inline("发布窗口 10 月 17 日"))
+        try await store.insert(item)
+        try await library.replaceChunks(for: item.id, with: [
+            ContentChunk(itemID: item.id, ordinal: 0, source: .inlineText, text: "发布窗口 10 月 17 日"),
+        ])
+        #expect(try await library.chunks(for: item.id).count == 1)
+
+        try await library.trash(id: item.id)
+        // 回收站里还能还原，分块必须留着。
+        #expect(try await library.chunks(for: item.id).count == 1)
+
+        try await library.purge(id: item.id)
+        #expect(try await library.chunks(for: item.id).isEmpty)
+    }
+
+    @Test("孤儿分块会被清掉：删干净了就不该还能被检索到")
+    func orphanChunksAreSwept() async throws {
+        let (library, store) = makeLibrary()
+        let item = Item(title: "已经删掉的东西", kind: .text, holding: .inline("敏感内容"))
+        try await store.insert(item)
+        try await library.replaceChunks(for: item.id, with: [
+            ContentChunk(itemID: item.id, ordinal: 0, source: .inlineText, text: "敏感内容"),
+        ])
+        // 模拟"条目没了、分块还在"——历史上任何一次漏删都会留下这种状态。
+        _ = try await store.purge(id: item.id)
+        try await store.replaceChunks(itemID: item.id, with: [
+            ContentChunk(itemID: item.id, ordinal: 0, source: .inlineText, text: "敏感内容"),
+        ])
+        #expect(try await library.chunks(for: item.id).count == 1)
+
+        let swept = try await library.purgeOrphanChunks()
+        #expect(swept == 1)
+        #expect(try await library.chunks(for: item.id).isEmpty)
+    }
+
+    @Test("清扫不碰还活着的条目，回收站里的也不碰")
+    func sweepKeepsLiveAndTrashedChunks() async throws {
+        let (library, store) = makeLibrary()
+        let live = Item(title: "还在用", kind: .text, holding: .inline("A"))
+        let trashed = Item(title: "在回收站", kind: .text, holding: .inline("B"))
+        try await store.insert(live)
+        try await store.insert(trashed)
+        for item in [live, trashed] {
+            try await library.replaceChunks(for: item.id, with: [
+                ContentChunk(itemID: item.id, ordinal: 0, source: .inlineText, text: item.title),
+            ])
+        }
+        try await library.trash(id: trashed.id)
+
+        #expect(try await library.purgeOrphanChunks() == 0)
+        #expect(try await library.chunks(for: live.id).count == 1)
+        #expect(try await library.chunks(for: trashed.id).count == 1)
+    }
+}

@@ -4555,6 +4555,10 @@ final class AppModel {
             if let missing = reconciliation.missingCopies.first {
                 lastError = "有受管副本缺失：\(missing.prefix(8))"
             }
+            // 条目彻底删掉了、分块还留着的话，被删的内容会继续出现在检索
+            // 结果里。正常路径不产生孤儿，这里是兜底的不变量检查。
+            let orphans = try await library.purgeOrphanChunks()
+            if orphans > 0 { ContextTrace.log("清掉 \(orphans) 条孤儿分块") }
             let result = try await library.purgeExpired()
             if !result.failures.isEmpty { lastError = result.failures.first?.description }
             _ = try await library.trashMissingReferences()

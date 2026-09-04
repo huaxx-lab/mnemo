@@ -21,6 +21,11 @@ public protocol ItemStore: Actor {
     /// 新正文配旧向量（反过来也可能），检索状态自相矛盾。
     func replaceChunks(itemID: UUID, with chunks: [ContentChunk], updating item: Item) throws
     func deleteChunks(itemID: UUID) throws
+    /// 库里所有分块归属的条目 ID。
+    ///
+    /// 用来找孤儿：条目已经被彻底删除、分块却还留着。今天的删除路径是对的，
+    /// 但"对"不该靠每个调用点都记得——这条查询让它变成可以被检查的不变量。
+    func chunkItemIDs() throws -> Set<UUID>
     func allTodos() throws -> [Todo]
     func todo(id: UUID) throws -> Todo?
     func upsertTodo(_ todo: Todo) throws
@@ -152,6 +157,8 @@ public actor InMemoryItemStore: ItemStore {
     }
 
     public func deleteChunks(itemID: UUID) throws { indexedChunks[itemID] = nil }
+
+    public func chunkItemIDs() throws -> Set<UUID> { Set(indexedChunks.keys) }
 
     public func allTodos() throws -> [Todo] {
         todos.values.sorted { $0.createdAt > $1.createdAt }

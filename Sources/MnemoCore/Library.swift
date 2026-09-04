@@ -288,6 +288,21 @@ public actor Library {
         if syncChanged { await notify(.upsertItem(itemID)) }
     }
 
+    /// 清掉孤儿分块：条目已经不在库里，分块还留着。
+    ///
+    /// 正常路径不该产生孤儿（purge 和清空回收站都会连分块一起删），可
+    /// "不该"是靠每个调用点自觉。检索读的是分块表，一旦漏删，被删掉的内容
+    /// 还会继续出现在答案里——这是最不该靠自觉的一类错误。启动时扫一遍，
+    /// 把它变成不变量。返回清掉的条目数。
+    @discardableResult
+    public func purgeOrphanChunks() async throws -> Int {
+        let alive = Set(try await store.all(includingTrashed: true).map(\.id))
+        let owners = try await store.chunkItemIDs()
+        let orphans = owners.subtracting(alive)
+        for itemID in orphans { try await store.deleteChunks(itemID: itemID) }
+        return orphans.count
+    }
+
     public func reconcileVault() async throws -> ReconcileReport {
         try await vault.reconcile()
     }

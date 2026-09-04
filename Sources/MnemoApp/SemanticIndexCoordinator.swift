@@ -119,6 +119,23 @@ enum SemanticIndexCoordinator {
             }
         }
 
+        // 链接的首图也进 RAG。
+        //
+        // 小红书这类内容常常**根本不在文字里**：正文只有一句"见图"，信息全
+        // 写在配图上。不读图的话这类笔记进了库也搜不到。首图已经被
+        // LinkCoverStore 缓存成本地 PNG，这里不再发网络请求。
+        if item.kind == .link, !Task.isCancelled {
+            let cover = LinkCoverStore.url(for: item.id)
+            if FileManager.default.fileExists(atPath: cover.path) {
+                let coverChunks = await SemanticContentExtractor.linkCoverChunks(
+                    itemID: item.id,
+                    coverURL: cover,
+                    ordinalBase: chunks.count
+                )
+                chunks.append(contentsOf: coverChunks)
+            }
+        }
+
         // 用户自己写的那一句排在最前面：改过的标题、加上的标签、分组。
         //
         // 它必须和正文走同一条路（分块 → Embedding → 召回），否则"我备注过

@@ -50,8 +50,19 @@ enum LinkContentFetcher {
         }
         // 小红书：笔记全文在 __INITIAL_STATE__ 里，比被截断的 meta 完整。
         if let note = SiteContentExtraction.Xiaohongshu.extract(fromHTML: html) {
-            let title = LinkTextExtraction.fromHTML(html, baseURL: url).title
-            return LinkTextExtraction.Extracted(title: title, text: LinkTextExtraction.clamp(note))
+            // 标题也从状态里取。<title> 在作者没填标题时会被整段正文顶替，
+            // 还带着 #话题# 和 " - 小红书" 后缀。
+            let title = SiteContentExtraction.Xiaohongshu.title(fromHTML: html)
+                ?? LinkTextExtraction.fromHTML(html, baseURL: url).title
+            return LinkTextExtraction.Extracted(
+                title: title,
+                text: LinkTextExtraction.clamp(note)
+            )
+        }
+        // GitHub 仓库页：正文是文件树和导航，真正有检索价值的 README 在
+        // article.markdown-body 里，通用抽取拿不到。
+        if let repository = SiteContentExtraction.GitHub.extract(fromHTML: html, url: url) {
+            return repository
         }
         return nil
     }
