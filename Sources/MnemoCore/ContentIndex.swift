@@ -656,6 +656,10 @@ public enum LexicalMatch {
 }
 
 public enum SemanticSearch {
+    /// 查询里的类型词命中时给的加分。够大到"找 PDF"时 PDF 排在前面，
+    /// 又不至于把词法/向量上明显更相关的其他类型压下去。
+    public static let kindBonus: Float = 0.12
+
     /// 先执行确定性的类型/日期过滤，再按每个 Pin 的最佳块聚合。旧向量仍参与，
     /// 但结果明确标记为正在重建索引。
     public static func rank(
@@ -666,8 +670,17 @@ public enum SemanticSearch {
         currentEmbeddingModelID: String?,
         limit: Int = 30
     ) -> [SemanticSearchHit] {
-        let candidates = VectorSearch.filter(items, by: query)
+        // 类型只加权、不排除：说"链接在哪里"的人要的是那行网址，不是"只在
+        // 链接类条目里找"。按类型排除会让答案所在的文本笔记直接消失。
+        //
+        // 时间范围仍然当条件用，但**滤空时退回全库**：查询里的时间词经常修饰
+        // 的是事件而不是条目本身（"上周五超时是什么原因"问的是那次故障，
+        // 笔记可能是今天写的），按它过滤会得到零结果。顺序不理想还能补救，
+        // 结果为空就是"它根本不知道"。
+        var candidates = VectorSearch.filter(items, by: query, matchingKinds: false)
+        if candidates.isEmpty { candidates = items }
         let candidateIDs = Set(candidates.map(\.id))
+        let kindPreferredIDs = Set(candidates.filter { VectorSearch.matchesKind($0, query) }.map(\.id))
         let itemByID = Dictionary(uniqueKeysWithValues: candidates.map { ($0.id, $0) })
         let normalizedQuery = query.semanticText.lowercased()
         var best: [UUID: SemanticSearchHit] = [:]
@@ -677,8 +690,10 @@ public enum SemanticSearch {
                 chunk.vector.map { VectorSearch.cosine(vector, $0) } ?? 0
             } ?? 0
             let lexicalScore = LexicalMatch.score(text: chunk.text, query: normalizedQuery)
-            let score = max(semanticScore, lexicalScore)
-            guard score > 0 else { continue }
+            let base = max(semanticScore, lexicalScore)
+            guard base > 0 else { continue }
+            // 类型对得上就往前提一档，对不上也照样留在结果里。
+            let score = base + (kindPreferredIDs.contains(chunk.itemID) ? Self.kindBonus : 0)
             let stale = itemByID[chunk.itemID]?.contentHash == nil
                 || (currentEmbeddingModelID.map { chunk.embeddingModelID != $0 } ?? false)
             let hit = SemanticSearchHit(
@@ -715,15 +730,13 @@ public enum SemanticSearch {
         }.prefix(max(1, limit)).map { $0 }
     }
 
+    /// 命中片段就是命中块的全文。
+    ///
+    /// 旧实现按 180 字切，而且**没有字面命中时取的是块首**——查询是自然语言、
+    /// 块里没有一模一样的字串是常态，于是绝大多数命中给出去的都是开头那 180
+    /// 字。一段文案里写在末尾的链接、结论、联系方式，从来没进过证据。
+    /// 块本身就是检索单元（约 1,200 字），整块给出去才是它的语义边界。
     private static func snippet(_ text: String, around query: String) -> String {
-        let flattened = text.replacingOccurrences(of: "\n", with: " ")
-        guard !query.isEmpty,
-              let range = flattened.range(of: query, options: .caseInsensitive) else {
-            return String(flattened.prefix(180))
-        }
-        let offset = flattened.distance(from: flattened.startIndex, to: range.lowerBound)
-        let startOffset = max(0, offset - 60)
-        let start = flattened.index(flattened.startIndex, offsetBy: startOffset)
-        return String(flattened[start...].prefix(180))
+        text.replacingOccurrences(of: "\n", with: " ")
     }
 }

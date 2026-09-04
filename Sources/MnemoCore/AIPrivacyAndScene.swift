@@ -381,6 +381,14 @@ public enum QueryUnderstanding {
             return (interval.start, interval.end)
         }
 
+        // "上周五 / 这周三"说的是具体某一天，不是整周。可 contains("上周")
+        // 在"上周五"上照样命中，于是范围被放大成整整一周，再按它过滤就会
+        // 把答案滤没。周/月这类日历格子在出现星期几时一律让位。
+        let hasWeekday = query.range(
+            of: #"(?:这|本|下|下下|上)?\s*(?:周|星期|礼拜)\s*[一二三四五六日天末1-7]"#,
+            options: .regularExpression
+        ) != nil
+
         for (words, resolve) in [
             (TimeWindowVocabulary.dayBeforeYesterday, { day(offset: -2) }),
             (TimeWindowVocabulary.yesterday, { day(offset: -1) }),
@@ -391,6 +399,9 @@ public enum QueryUnderstanding {
             (TimeWindowVocabulary.thisMonth, { unit(.month, offset: 0) }),
             (TimeWindowVocabulary.thisYear, { unit(.year, offset: 0) }),
         ] as [([String], () -> (Date, Date)?)] {
+            let isWeekWord = words == TimeWindowVocabulary.thisWeek
+                || words == TimeWindowVocabulary.lastWeek
+            if isWeekWord, hasWeekday { continue }
             guard words.contains(where: { query.localizedCaseInsensitiveContains($0) }),
                   let window = resolve() else { continue }
             return (window.0, window.1)
@@ -465,9 +476,28 @@ public enum VectorSearch {
         return value.isFinite ? value : 0
     }
 
-    public static func filter(_ items: [Item], by query: StructuredQuery) -> [Item] {
+    /// 查询里的类型词命中这条了吗。没提类型时人人都算命中。
+    ///
+    /// 它是**排序偏好**，不是准入条件——见 `filter` 的说明。
+    public static func matchesKind(_ item: Item, _ query: StructuredQuery) -> Bool {
+        query.kinds.isEmpty || query.kinds.contains(item.kind)
+    }
+
+    /// 确定性过滤。
+    ///
+    /// `matchingKinds: false` 时**不按类型排除**。理由是类型词在自然语言里
+    /// 多半不是约束而是描述："我那个软件的 github 链接在哪里"里的"链接"说的是
+    /// 要找的那行字，不是"只在链接类条目里找"。可它会被解析成 kinds=[.link]，
+    /// 于是答案所在的那条文本笔记连同全库文本条目一起被剔除，检索直接返回
+    /// 零命中——用户看到的是"它根本不知道"，而真正发生的是候选里压根没有它。
+    /// 时间范围不一样：那是用户明确划的界，仍然照做。
+    public static func filter(
+        _ items: [Item],
+        by query: StructuredQuery,
+        matchingKinds: Bool = true
+    ) -> [Item] {
         items.filter { item in
-            if !query.kinds.isEmpty, !query.kinds.contains(item.kind) { return false }
+            if matchingKinds, !matchesKind(item, query) { return false }
             guard query.startDate != nil || query.endDate != nil else { return true }
             // 两个时间都算数：一篇三月定稿、上周才拖进来的论文，用户说"上周那份"
             // 指的是入库时间，说"三月那版"指的是文件自己的时间。两种说法都对，

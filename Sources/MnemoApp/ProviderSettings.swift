@@ -946,53 +946,6 @@ final class ProviderSettingsModel {
         }
     }
 
-    /// 候选负载的总字符预算。超了就压缩每条的片段，**绝不**截断序列化后的
-    /// JSON——旧实现是 `candidateJSON.prefix(12_000)`，会从对象中间切断，
-    /// 喂给模型一段坏掉的 JSON。
-    private static let candidatePayloadBudget = 14_000
-
-    /// 候选序列化成 JSON。两条检索路径（流式回答、控制器）共用同一份字段，
-    /// 否则给一处补了时间、另一处没补，同一句"最新那版"在两条路上给出不同答案。
-    ///
-    /// 时间一律写成绝对时间，"现在"作为唯一参照点在提示词里单独给一次——
-    /// 和待办提取那边是同一条规则：让模型自己做日期算术是它最容易错的地方。
-    private static func candidatePayload(
-        _ candidates: [RetrievalRankingCandidate],
-        snippetKey: String,
-        now: Date
-    ) -> [[String: Any]] {
-        let snippetBudget = max(
-            120,
-            candidatePayloadBudget / max(1, candidates.count) - 220
-        )
-        return candidates.map { candidate in
-            var object: [String: Any] = [
-                "itemID": candidate.itemID.uuidString,
-                "title": candidate.title,
-                "kind": candidate.kind.rawValue,
-                snippetKey: String(candidate.snippet.prefix(snippetBudget)),
-                "localScore": Double(candidate.localScore),
-                "hasLocalEvidence": candidate.hasLocalEvidence,
-                // 内容自己的时间。文件用它自身的修改时间，剪贴板内容只有入库时间。
-                "contentDate": RetrievalTemporalFormat.absolute(candidate.temporal.contentDate),
-                "contentDateIsFromFile": candidate.temporal.contentDateIsFromSource,
-                "capturedAt": RetrievalTemporalFormat.absolute(candidate.temporal.capturedAt),
-                "age": RetrievalTemporalFormat.relative(candidate.temporal.contentDate, now: now),
-            ]
-            if let filename = candidate.filename { object["filename"] = filename }
-            if let group = candidate.group { object["group"] = group }
-            if !candidate.tags.isEmpty { object["tags"] = candidate.tags }
-            if let versionGroup = candidate.versionGroup,
-               let rank = candidate.versionRank,
-               let total = candidate.versionCount {
-                object["versionGroup"] = versionGroup
-                object["versionRank"] = rank
-                object["versionCount"] = total
-            }
-            return object
-        }
-    }
-
     /// 提示词里那段共用的时间说明。
     private static func temporalGuidance(now: Date, recency: RecencyPreference?) -> String {
         let preference = switch recency {
@@ -1018,7 +971,7 @@ final class ProviderSettingsModel {
         recency: RecencyPreference?,
         now: Date = .now
     ) throws -> SearchAnswerPrompt {
-        let candidateObjects = Self.candidatePayload(candidates, snippetKey: "excerpt", now: now)
+        let candidateObjects = RetrievalEvidence.payload(candidates, snippetKey: "excerpt", now: now)
         let data = try JSONSerialization.data(withJSONObject: candidateObjects)
         let candidateJSON = String(decoding: data, as: UTF8.self)
 
@@ -1029,7 +982,8 @@ final class ProviderSettingsModel {
 
             关于候选字段：
             - title 可能是 AI 生成的概括，filename 往往才带着真正的标识（会议、编号、DOI）。
-            - excerpt 是命中的片段或条目摘要，不一定覆盖全文。
+            - excerpt 就是这条候选的完整可读正文，不是摘要，答案如果在它里面就一定看得到。
+            - excerptOmitted=true 表示这一条的正文太长、本次没有随负载给出，不是它没有内容。
             - hasLocalEvidence=false 表示本地没有任何关键词或向量命中，它只是被\
             补进来供你按标题和文件名判断，不要因为它出现在列表里就当作证据。
 
@@ -1133,7 +1087,7 @@ final class ProviderSettingsModel {
         if let cached = retrievalDecisionCache[cacheKey] { return .selected(cached) }
 
         // 和流式搜索共用“先压每项、再完整序列化”的规则，绝不从 JSON 中间截断。
-        let candidateObjects = Self.candidatePayload(candidates, snippetKey: "snippet", now: now)
+        let candidateObjects = RetrievalEvidence.payload(candidates, snippetKey: "snippet", now: now)
         guard let data = try? JSONSerialization.data(withJSONObject: candidateObjects),
               let candidateJSON = String(data: data, encoding: .utf8) else { return .unavailable }
         let allowedIDs = Set(candidates.map(\.itemID))
