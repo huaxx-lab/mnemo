@@ -67,7 +67,9 @@ public actor AIExecutionEngine {
         privacyText: String? = nil,
         maxTokens: Int = 512,
         image: ChatImageInput? = nil,
-        allowSensitiveContent: Bool = false
+        allowSensitiveContent: Bool = false,
+        tools: [AITool] = [],
+        turns: [AIChatTurn] = []
     ) async throws -> AIExecutionResult {
         let plan = try await plan(
             feature: feature,
@@ -80,7 +82,9 @@ public actor AIExecutionEngine {
             privacyText: privacyText,
             maxTokens: maxTokens,
             image: image,
-            allowSensitiveContent: allowSensitiveContent
+            allowSensitiveContent: allowSensitiveContent,
+            tools: tools,
+            turns: turns
         )
         let output = try await client.complete(
             provider: plan.provider,
@@ -149,7 +153,9 @@ public actor AIExecutionEngine {
         privacyText: String?,
         maxTokens: Int,
         image: ChatImageInput?,
-        allowSensitiveContent: Bool
+        allowSensitiveContent: Bool,
+        tools: [AITool] = [],
+        turns: [AIChatTurn] = []
     ) async throws -> ExecutionPlan {
         guard let configured = profile.route(for: feature) else {
             throw AIExecutionError.routeNotConfigured(feature)
@@ -196,7 +202,9 @@ public actor AIExecutionEngine {
                 maxTokens: maxTokens,
                 reasoningEffort: resolution.route.reasoningEffort,
                 modelSupportsReasoning: descriptor?.supportsReasoning == true,
-                image: image
+                image: image,
+                tools: tools,
+                turns: turns
             ),
             routeNotice: resolution.notice
         )

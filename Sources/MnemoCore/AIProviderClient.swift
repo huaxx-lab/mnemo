@@ -167,6 +167,11 @@ public struct ChatCompletionInput: Sendable, Equatable {
     public var reasoningEffort: AIReasoningEffort
     public var modelSupportsReasoning: Bool
     public var image: ChatImageInput?
+    /// 这一轮允许模型自己调用的工具。空数组就是普通一次性补全。
+    public var tools: [AITool]
+    /// 第一条用户消息之后的往返（模型的工具调用、本地回给它的结果）。
+    /// ReAct 循环每转一圈往这里追加两条。
+    public var turns: [AIChatTurn]
 
     public init(
         model: String,
@@ -175,7 +180,9 @@ public struct ChatCompletionInput: Sendable, Equatable {
         maxTokens: Int = 512,
         reasoningEffort: AIReasoningEffort = .off,
         modelSupportsReasoning: Bool = false,
-        image: ChatImageInput? = nil
+        image: ChatImageInput? = nil,
+        tools: [AITool] = [],
+        turns: [AIChatTurn] = []
     ) {
         self.model = model
         self.system = system
@@ -184,6 +191,8 @@ public struct ChatCompletionInput: Sendable, Equatable {
         self.reasoningEffort = reasoningEffort
         self.modelSupportsReasoning = modelSupportsReasoning
         self.image = image
+        self.tools = tools
+        self.turns = turns
     }
 }
 
@@ -208,19 +217,24 @@ public struct ChatCompletionOutput: Sendable, Equatable {
     /// 供应商明确表示是因为输出 token 上限而停止。调用方生成用户可见的完整答案时
     /// 必须拒绝发布这种半成品；排序 JSON 等结构化路径则会按解析失败处理。
     public var wasTruncated: Bool
+    /// 模型这一轮要求调用的工具。非空时 `text` 允许为空——那是正常的
+    /// "我先查一下"，不是空回复。
+    public var toolCalls: [AIToolCall] = []
 
     public init(
         text: String,
         reasoning: String? = nil,
         inputTokens: Int? = nil,
         outputTokens: Int? = nil,
-        wasTruncated: Bool = false
+        wasTruncated: Bool = false,
+        toolCalls: [AIToolCall] = []
     ) {
         self.text = text
         self.reasoning = reasoning
         self.inputTokens = inputTokens
         self.outputTokens = outputTokens
         self.wasTruncated = wasTruncated
+        self.toolCalls = toolCalls
     }
 }
 
@@ -513,7 +527,46 @@ public actor AIProviderClient {
             } else {
                 messages.append(["role": "user", "content": input.prompt])
             }
+            for turn in input.turns {
+                switch turn {
+                case .assistant(let text, let calls):
+                    var message: [String: Any] = ["role": "assistant"]
+                    message["content"] = text ?? ""
+                    if !calls.isEmpty {
+                        message["tool_calls"] = calls.map { call in
+                            [
+                                "id": call.id,
+                                "type": "function",
+                                "function": [
+                                    "name": call.name,
+                                    "arguments": call.argumentsJSON,
+                                ],
+                            ] as [String: Any]
+                        }
+                    }
+                    messages.append(message)
+                case .toolResult(let result):
+                    messages.append([
+                        "role": "tool",
+                        "tool_call_id": result.callID,
+                        "content": result.contentJSON,
+                    ])
+                }
+            }
             body["messages"] = messages
+            if !input.tools.isEmpty {
+                body["tools"] = input.tools.map { tool in
+                    [
+                        "type": "function",
+                        "function": [
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": tool.parameters,
+                        ],
+                    ] as [String: Any]
+                }
+                body["tool_choice"] = "auto"
+            }
             if input.modelSupportsReasoning, input.reasoningEffort != .off {
                 body["reasoning_effort"] = input.reasoningEffort.rawValue
                 // 思考 token 也算在 max_tokens 里。调用方给的是**回答预算**，
@@ -539,6 +592,44 @@ public actor AIProviderClient {
             } else {
                 body["messages"] = [["role": "user", "content": input.prompt]]
             }
+            if !input.turns.isEmpty {
+                var messages = (body["messages"] as? [[String: Any]]) ?? []
+                for turn in input.turns {
+                    switch turn {
+                    case .assistant(let text, let calls):
+                        var blocks: [[String: Any]] = []
+                        if let text, !text.isEmpty {
+                            blocks.append(["type": "text", "text": text])
+                        }
+                        for call in calls {
+                            blocks.append([
+                                "type": "tool_use",
+                                "id": call.id,
+                                "name": call.name,
+                                "input": call.arguments(),
+                            ])
+                        }
+                        messages.append(["role": "assistant", "content": blocks])
+                    case .toolResult(let result):
+                        // Anthropic 把工具结果放在**用户**回合里。
+                        messages.append(["role": "user", "content": [[
+                            "type": "tool_result",
+                            "tool_use_id": result.callID,
+                            "content": result.contentJSON,
+                        ]]])
+                    }
+                }
+                body["messages"] = messages
+            }
+            if !input.tools.isEmpty {
+                body["tools"] = input.tools.map { tool in
+                    [
+                        "name": tool.name,
+                        "description": tool.description,
+                        "input_schema": tool.parameters,
+                    ] as [String: Any]
+                }
+            }
             if let system = input.system { body["system"] = system }
             if input.modelSupportsReasoning, input.reasoningEffort != .off {
                 let budget = reasoningBudget(input.reasoningEffort)
@@ -561,6 +652,7 @@ public actor AIProviderClient {
         let text: String?
         let wasTruncated: Bool
         let reasoning: String?
+        var toolCalls: [AIToolCall] = []
         switch dialect {
         case .openAICompatible:
             let choices = root["choices"] as? [[String: Any]]
@@ -570,14 +662,37 @@ public actor AIProviderClient {
                 .compactMap { message?[$0] as? String }
                 .first { !$0.isEmpty }
             wasTruncated = (choices?.first?["finish_reason"] as? String) == "length"
+            for entry in (message?["tool_calls"] as? [[String: Any]]) ?? [] {
+                guard let function = entry["function"] as? [String: Any],
+                      let name = function["name"] as? String else { continue }
+                toolCalls.append(AIToolCall(
+                    id: (entry["id"] as? String) ?? name,
+                    name: name,
+                    argumentsJSON: (function["arguments"] as? String) ?? "{}"
+                ))
+            }
         case .anthropicMessages:
             let content = root["content"] as? [[String: Any]]
             text = content?.first(where: { ($0["type"] as? String) == "text" })?["text"] as? String
             reasoning = content?
                 .first(where: { ($0["type"] as? String) == "thinking" })?["thinking"] as? String
             wasTruncated = (root["stop_reason"] as? String) == "max_tokens"
+            for block in content ?? [] where (block["type"] as? String) == "tool_use" {
+                guard let name = block["name"] as? String else { continue }
+                let input = (block["input"] as? [String: Any]) ?? [:]
+                let arguments = (try? JSONSerialization.data(withJSONObject: input))
+                    .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+                toolCalls.append(AIToolCall(
+                    id: (block["id"] as? String) ?? name,
+                    name: name,
+                    argumentsJSON: arguments
+                ))
+            }
         }
-        guard let text = text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
+        let body = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        // 只要求调用工具、这一轮不写正文，是**正常**的一步推理，不是空回复。
+        // 按空回复报错的话，ReAct 的第一步就永远走不通。
+        guard !body.isEmpty || !toolCalls.isEmpty else {
             // 只有思考没有正文，而且是被上限截断的：预算全花在想上了。
             // 和"模型什么都没说"是两回事，报错要能指到那儿去。
             if wasTruncated, reasoning?.isEmpty == false { throw ProviderError.truncatedOutput }
@@ -585,13 +700,14 @@ public actor AIProviderClient {
         }
         let usage = root["usage"] as? [String: Any]
         return ChatCompletionOutput(
-            text: text,
+            text: body,
             reasoning: reasoning?.trimmingCharacters(in: .whitespacesAndNewlines),
             inputTokens: (usage?["prompt_tokens"] as? NSNumber)?.intValue
                 ?? (usage?["input_tokens"] as? NSNumber)?.intValue,
             outputTokens: (usage?["completion_tokens"] as? NSNumber)?.intValue
                 ?? (usage?["output_tokens"] as? NSNumber)?.intValue,
-            wasTruncated: wasTruncated
+            wasTruncated: wasTruncated,
+            toolCalls: toolCalls
         )
     }
 

@@ -212,6 +212,57 @@ public enum TodoRevisionPrompt {
     15. 拿不准是不是任务就不要加入 decisions。误建一条比漏掉一条更糟。
     16. 如果文字讲的是清单里已有的那件事，不要因为“已经有了”就忽略：时间变了用 reschedule，说法/范围变了用 rename，说做完了用 complete。rename 可以同时带新的 dueAt，不要把同一条旧待办拆成两次修改。
     """
+    /// 工具版的系统提示词。
+    ///
+    /// 和上面那版 JSON 的区别不只是输出形式：这一版**不再预先把时间算好塞给
+    /// 模型**。旧做法是本地先把"明天早上七点"换算成绝对时间写进文本，再规定
+    /// "绝对时间是唯一依据、禁止自行重算"——于是本地每一次读错都变成模型无法
+    /// 纠正的事实。实测"今天下午八点开会，明天早上七点买咖啡"曾被换算成
+    /// 「明天 下午八点」和「今天 早上七点」，两个时间在子句之间交叉配对全错，
+    /// 模型只能照着错的答。
+    ///
+    /// 改成工具之后，分工换了个方向：**哪半句时间属于哪件事**由模型判断（它
+    /// 懂语义），**那半句是几点**由本地算（日期算术是模型最容易错的地方）。
+    public static let toolSystem = """
+    你是 Mnemo 的待办理解器。输入可能是用户复制的普通文字，也可能是截图 OCR，\
+    其中会混入状态栏时间、聊天时间戳、广告、商品信息和历史对话。你要理解语义，\
+    判断它是否表达用户未来要做的事，或者是否在修改现有待办，然后**调用工具**\
+    把结论表达出来。
+
+    ── 时间的硬性规定（最重要，违反即视为错误）──
+    1. 开始判断之前，**必须先调用 current_time** 拿到今天是几号、现在几点、星期几。
+       不许凭空假设日期。
+    2. 任何待办只要带时间，**必须调用 resolve_time 换算**，把 dueAt 填成它返回的
+       absolute 值。**严禁自己写 ISO 时间字符串**，也严禁自己推算"明天是几号"。
+    3. 每件事**分别**调用一次 resolve_time，只传属于它自己的那半句时间。
+       "今天下午八点开会，明天早上七点买咖啡"要调用两次：一次传「今天下午八点」，
+       一次传「明天早上七点」。绝不能把两件事的时间合起来问，也不能把一件事的
+       日期配到另一件事的钟点上。
+    4. resolve_time 返回 resolved=false 说明那句话里没有可换算的时间，
+       这条待办就不填 dueAt，不要硬编一个。
+
+    ── 判断规则 ──
+    5. 一件可以独立完成、改期或删除的事就调用一次 create_todo。并列动作必须拆开，
+       不能概括成一条；一轮最多 5 条。
+    6. 一段输入可以同时修改旧待办和新建另一件事，不要因为只能做一件而丢掉其余内容。
+    7. 是否是待办由语义决定，不依赖固定场景词。"明天八点赶回合肥""明天改两个图"都是待办。
+    8. 手机状态栏时间、聊天时间戳、页面发布日期、广告有效期本身不是待办。
+    9. 只有说话人自己的计划、对自己的要求、已下的订单/包裹状态才算。转述别人一律忽略。
+    10. todo 参数只能填清单里已有的编号，不许猜，也不许编。
+    11. evidence 必须逐字复制自原文，并且只支撑当前这一条；不能概括、不能改写。
+    12. code 必须逐字来自原文，不能纠正或补位。无法确定就不填。
+    13. 取消、完成 needsConfirmation 必须 true；有指代、主体不清、OCR 歧义时也要 true。
+    14. 拿不准是不是任务就不要调用任何 create/reschedule/complete/cancel。
+        误建一条比漏掉一条更糟。
+    15. 只有日期没有钟点时，交东西（截止、提交、报名、缴费）用当天 23:59，
+        去场合（开会、典礼、见面、上课、体检）用当天 09:00；原文写了"上午/早上/
+        中午/下午/傍晚/晚上"就按它对应的钟点。这些都通过 resolve_time 表达，
+        把带时段词的原文整句传进去。
+
+    判断完就停下，不要再输出解释性文字。什么待办都没有时，不调用任何工具，
+    直接回一句"无"。
+    """
+
     /// few-shot 例子。
     ///
     /// 覆盖并列任务拆分、同批新建与修改、改期指代、取消、完成、第三方转述，
@@ -264,6 +315,106 @@ public enum TodoRevisionPrompt {
     文字：「星期五 23:35」
     {"decisions":[]}
     """
+    /// 工具版的用户消息。
+    ///
+    /// 只给**原文**和现有清单，不再附本地算好的绝对时间——时间由模型自己
+    /// 调 current_time / resolve_time 取。
+    public static func toolUserMessage(
+        text: String,
+        candidates: [TodoRevisionCandidate],
+        formatter: ISO8601DateFormatter = ISO8601DateFormatter()
+    ) -> String {
+        var lines: [String] = ["现有待办清单："]
+        if candidates.isEmpty {
+            lines.append("（空）")
+        } else {
+            for candidate in candidates {
+                var line = "\(candidate.index). \(candidate.title)"
+                if let dueAt = candidate.dueAt {
+                    line += "（截止 \(formatter.string(from: dueAt))）"
+                }
+                if let context = candidate.sourceContext, !context.isEmpty {
+                    line += "\n   来源摘录：\(context)"
+                }
+                lines.append(line)
+            }
+        }
+        lines.append("")
+        lines.append("原始文字：")
+        lines.append(text)
+        return lines.joined(separator: "\n")
+    }
+
+    /// 把模型的一次工具调用翻译成本地的决策。
+    ///
+    /// 只做翻译和形状校验；"这条能不能落库"仍由调用方按原文逐字验证
+    /// evidence、按编号对回候选之后决定——模型能提议，不能直接写库。
+    public static func decision(
+        fromToolCall call: AIToolCall,
+        formatter: ISO8601DateFormatter = ISO8601DateFormatter()
+    ) -> TodoRevisionDecision? {
+        let arguments = call.arguments()
+        func string(_ key: String) -> String? {
+            guard let value = (arguments[key] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                !value.isEmpty else { return nil }
+            return value
+        }
+        func date(_ key: String) -> Date? {
+            guard let raw = string(key) else { return nil }
+            if let value = formatter.date(from: raw) { return value }
+            // 有的模型会带上小数秒。多试一次，别为一个格式差异丢掉整条待办。
+            let lenient = ISO8601DateFormatter()
+            lenient.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            return lenient.date(from: raw)
+        }
+        let index = (arguments["todo"] as? NSNumber)?.intValue
+            ?? (arguments["todo"] as? Int)
+        let kind = string("kind").flatMap(TodoRevisionDecision.Kind.init(rawValue:)) ?? .general
+        let needsConfirmation = (arguments["needsConfirmation"] as? Bool) ?? true
+        let evidence = string("evidence")
+        let reason = string("reason") ?? ""
+
+        switch call.name {
+        case TodoTools.createTodo.name:
+            guard let title = string("title"), evidence != nil else { return nil }
+            return TodoRevisionDecision(
+                action: .create, index: nil, title: title, dueAt: date("dueAt"),
+                reason: reason, kind: kind, service: string("service"),
+                code: string("code"), evidence: evidence,
+                needsConfirmation: needsConfirmation
+            )
+        case TodoTools.rescheduleTodo.name:
+            guard let index, let dueAt = date("dueAt"), evidence != nil else { return nil }
+            return TodoRevisionDecision(
+                action: .reschedule, index: index, title: nil, dueAt: dueAt,
+                reason: reason, kind: kind, evidence: evidence,
+                needsConfirmation: needsConfirmation
+            )
+        case TodoTools.renameTodo.name:
+            guard let index, let title = string("title"), evidence != nil else { return nil }
+            return TodoRevisionDecision(
+                action: .rename, index: index, title: title, dueAt: date("dueAt"),
+                reason: reason, kind: kind, evidence: evidence,
+                needsConfirmation: needsConfirmation
+            )
+        case TodoTools.completeTodo.name:
+            guard let index, evidence != nil else { return nil }
+            return TodoRevisionDecision(
+                action: .complete, index: index, reason: reason, kind: kind,
+                evidence: evidence, needsConfirmation: true
+            )
+        case TodoTools.cancelTodo.name:
+            guard let index, evidence != nil else { return nil }
+            return TodoRevisionDecision(
+                action: .cancel, index: index, reason: reason, kind: kind,
+                evidence: evidence, needsConfirmation: true
+            )
+        default:
+            return nil
+        }
+    }
+
     /// 拼出这一次的用户消息。
     ///
     /// 现有待办**每次都带上**：模型判断"这是不是同一件事"必须看得到清单，

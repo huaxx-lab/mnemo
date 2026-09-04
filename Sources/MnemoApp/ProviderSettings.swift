@@ -676,32 +676,53 @@ final class ProviderSettingsModel {
             SHA256.hash(data: Data(temporal.originalText.utf8))
                 .map { String(format: "%02x", $0) }.joined(),
             candidateFingerprint,
-            "temporal-v2-multi-limit-\(TodoRevisionPrompt.maximumDecisionCount)",
+            "tool-v1-limit-\(TodoRevisionPrompt.maximumDecisionCount)",
         ].joined(separator: "###")
         let cacheKey = SHA256.hash(data: Data(rawKey.utf8))
             .map { String(format: "%02x", $0) }.joined()
         if let cached = todoRevisionCache[cacheKey] { return .decided(cached) }
 
         do {
-            let decisions = try await completeStructured(
+            // 工具版优先：时间由模型自己调 resolve_time 换算，本地不再预先把
+            // 归一化文本塞给它。端点不支持工具（或直接报错）时退回原来的
+            // JSON 一次性路径，两条路在评测语料上都要能判对。
+            let decisions: [TodoRevisionDecision]
+            if let toolDecisions = try? await completeWithTools(
                 feature: .todoRevision,
-                system: TodoRevisionPrompt.system + "\n\n" + TodoRevisionPrompt.examples,
-                prompt: TodoRevisionPrompt.userMessage(
-                    text: temporal.normalizedText,
-                    originalText: temporal.originalText,
-                    candidates: candidates,
-                    now: now
+                system: TodoRevisionPrompt.toolSystem,
+                prompt: TodoRevisionPrompt.toolUserMessage(
+                    text: trimmed,
+                    candidates: candidates
                 ),
-                // 隐私筛查看原始文本；归一化文本只是本地推导出的同一份内容。
                 privacyText: temporal.originalText,
                 maxTokens: 1_200,
-                parse: { output in
-                    try TodoRevisionPrompt.decisions(
-                        from: output,
-                        candidateCount: candidates.count
-                    )
-                }
-            )
+                tools: TodoTools.all,
+                now: now,
+                calendar: .autoupdatingCurrent
+            ).compactMap({ TodoRevisionPrompt.decision(fromToolCall: $0) }),
+               !toolDecisions.isEmpty {
+                decisions = toolDecisions
+            } else {
+                decisions = try await completeStructured(
+                    feature: .todoRevision,
+                    system: TodoRevisionPrompt.system + "\n\n" + TodoRevisionPrompt.examples,
+                    prompt: TodoRevisionPrompt.userMessage(
+                        text: temporal.normalizedText,
+                        originalText: temporal.originalText,
+                        candidates: candidates,
+                        now: now
+                    ),
+                    // 隐私筛查看原始文本；归一化文本只是本地推导出的同一份内容。
+                    privacyText: temporal.originalText,
+                    maxTokens: 1_200,
+                    parse: { output in
+                        try TodoRevisionPrompt.decisions(
+                            from: output,
+                            candidateCount: candidates.count
+                        )
+                    }
+                )
+            }
             todoRevisionCache[cacheKey] = decisions
             todoRevisionCacheOrder.removeAll { $0 == cacheKey }
             todoRevisionCacheOrder.append(cacheKey)
@@ -1677,7 +1698,9 @@ final class ProviderSettingsModel {
         privacyText: String?,
         maxTokens: Int,
         image: ChatImageInput? = nil,
-        allowSensitiveContent: Bool = false
+        allowSensitiveContent: Bool = false,
+        tools: [AITool] = [],
+        turns: [AIChatTurn] = []
     ) async throws -> AIExecutionResult {
         let credentialStore = credentialStore
         let routeProviderID = routing.route(for: feature)?.providerID
@@ -1703,7 +1726,9 @@ final class ProviderSettingsModel {
                     privacyText: privacyText,
                     maxTokens: maxTokens,
                     image: image,
-                    allowSensitiveContent: allowSensitiveContent
+                    allowSensitiveContent: allowSensitiveContent,
+                    tools: tools,
+                    turns: turns
                 )
                 if let routeProviderID { providerErrors[routeProviderID] = nil }
                 return result
@@ -1724,6 +1749,63 @@ final class ProviderSettingsModel {
 
     /// 结构化响应仅在“请求成功但格式无法解析”时修复一次。路由、网络、
     /// 限流和隐私错误直接返回，避免把失败放大成重复调用。
+    /// ReAct 循环：模型自己决定调哪个工具，本地执行只读工具并把结果发回，
+    /// 直到它不再要求调用为止。
+    ///
+    /// 只读工具（current_time / resolve_time）在本地直接执行；建/改/删这类
+    /// 是**结论**，不在循环里执行——收集起来交给上层逐条按原文校验后才可能
+    /// 落库。模型能提议，不能直接写库，这条边界和以前一样。
+    private func completeWithTools(
+        feature: AIFeature,
+        system: String,
+        prompt: String,
+        privacyText: String?,
+        maxTokens: Int,
+        tools: [AITool],
+        now: Date,
+        calendar: Calendar,
+        maximumRounds: Int = 6
+    ) async throws -> [AIToolCall] {
+        var turns: [AIChatTurn] = []
+        var decisions: [AIToolCall] = []
+
+        for _ in 0..<maximumRounds {
+            try Task.checkCancellation()
+            let result = try await complete(
+                feature: feature,
+                system: system,
+                prompt: prompt,
+                privacyText: privacyText,
+                maxTokens: maxTokens,
+                tools: tools,
+                turns: turns
+            )
+            let calls = result.output.toolCalls
+            guard !calls.isEmpty else { return decisions }
+
+            // 结论类调用先收着，不发回结果——它们不是"查询"，模型不需要回执。
+            decisions.append(contentsOf: calls.filter { TodoTools.isDecision($0.name) })
+
+            let queries = calls.filter { !TodoTools.isDecision($0.name) }
+            let results = queries.compactMap {
+                TodoTools.execute($0, now: now, calendar: calendar)
+            }
+            // 一轮里全是结论、没有任何查询：模型已经给完答案了，不必再转一圈。
+            guard !results.isEmpty else { return decisions }
+
+            turns.append(.assistant(text: result.output.text, toolCalls: calls))
+            // 结论类调用也要给一个回执，否则 OpenAI 方言会因为 tool_calls
+            // 没有对应的 tool 消息而整轮报错。
+            for call in calls where TodoTools.isDecision(call.name) {
+                turns.append(.toolResult(AIToolResult(
+                    callID: call.id, name: call.name, contentJSON: #"{"recorded":true}"#
+                )))
+            }
+            for value in results { turns.append(.toolResult(value)) }
+        }
+        return decisions
+    }
+
     private func completeStructured<T>(
         feature: AIFeature,
         system: String,

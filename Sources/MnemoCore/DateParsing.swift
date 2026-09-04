@@ -50,14 +50,47 @@ public enum ChineseDateParser {
             { periodBoundary(in: $0, now: $1, calendar: calendar) },
         ]
 
-        for resolve in dayResolvers {
-            guard let hit = resolve(text, now) else { continue }
-            let resolved = apply(time: time, to: hit.day, calendar: calendar)
-            return ParsedDateReference(
-                date: resolved,
-                hasExplicitTime: time != nil,
-                matchedText: [hit.matched, time?.matched].compactMap { $0 }.joined(separator: " ")
-            )
+        // 日期词和钟点只有落在**同一个子句**里才属于彼此。
+        //
+        // 原来两者各自在全文里找第一个，然后无条件配对："今天下午八点开会，
+        // 明天早上七点买咖啡"于是被解析成「明天 下午八点」——日期取自第二个
+        // 子句、钟点取自第一个，两件事的时间全错。而提示词明确告诉模型
+        // "绝对时间是唯一依据，禁止自行重算"，模型再准也只能照着错的答。
+        //
+        // 跨子句时按子句先后取，子句内部仍然按信息量优先——"9月5日周三"里
+        // 年月日不会被"周三"截胡，因为它们在同一个子句里。
+        let timeClause = time
+            .flatMap { text.range(of: $0.matched) }
+            .map { clauseIndex(of: $0, in: text) }
+        var best: (hit: (day: Date, matched: String), clause: Int, priority: Int)?
+        for (priority, resolve) in dayResolvers.enumerated() {
+            guard let hit = resolve(text, now),
+                  let range = text.range(of: hit.matched) else { continue }
+            let clause = clauseIndex(of: range, in: text)
+            if let current = best, (current.clause, current.priority) <= (clause, priority) {
+                continue
+            }
+            best = (hit, clause, priority)
+        }
+        if let best {
+            let paired = timeClause == best.clause ? time : nil
+            // 日期词是"今天"、钟点却在别的子句里（聊天记录最常见：上面一句
+            // "今天中午吃什么"，下面一句"组会改到四点"）。这时候两条路给出的
+            // 日期本来就一样——裸钟点的默认解释就是今天——但只返回日期词会把
+            // 钟点整个丢掉。让位给下面的裸钟点分支，信息更全且不会更错。
+            let isTodayWithoutOwnClock = paired == nil
+                && time != nil
+                && calendar.isDate(best.hit.day, inSameDayAs: calendar.startOfDay(for: now))
+            if !isTodayWithoutOwnClock {
+                let resolved = apply(time: paired, to: best.hit.day, calendar: calendar)
+                return ParsedDateReference(
+                    date: resolved,
+                    hasExplicitTime: paired != nil,
+                    matchedText: [best.hit.matched, paired?.matched]
+                        .compactMap { $0 }
+                        .joined(separator: " ")
+                )
+            }
         }
 
         // 只写了时间没写日期（"三点半开会"）：指的是今天那个点；
@@ -231,6 +264,15 @@ public enum ChineseDateParser {
         return nil
     }
 
+    /// 子句边界。中文里逗号、分号、顿号分隔的就是不同的事。
+    private static let clauseSeparators = Set("，,。；;、!?！？\n")
+
+    /// 这个位置落在第几个子句里。
+    private static func clauseIndex(of range: Range<String.Index>, in text: String) -> Int {
+        text[text.startIndex..<range.lowerBound]
+            .reduce(0) { clauseSeparators.contains($1) ? $0 + 1 : $0 }
+    }
+
     private static func relativeDay(
         in text: String,
         now: Date,
@@ -241,17 +283,28 @@ public enum ChineseDateParser {
             ("今天", 0), ("今日", 0), ("本日", 0),
             ("昨天", -1), ("昨日", -1), ("前天", -2),
         ]
-        // 长词优先：先匹配"大后天"，否则会被"后天"抢走两天的差。
-        for entry in table.sorted(by: { $0.word.count > $1.word.count })
-        where text.contains(entry.word) {
-            guard let day = calendar.date(
+        // 取**出现得最早**的那个词，而不是表里排在前面的那个。
+        //
+        // 原来是按词长排序后返回第一个 contains 命中，完全不看位置：一句话里
+        // 同时有"今天"和"明天"时永远返回"明天"（它在表里靠前），于是第一个
+        // 子句的事情被安到了第二天。
+        //
+        // 按位置取也自然保住了长词优先："大后天"里的"后天"起点更靠后，
+        // 不会抢走那两天的差。
+        let hit = table
+            .compactMap { entry -> (index: String.Index, word: String, offset: Int)? in
+                text.range(of: entry.word).map { ($0.lowerBound, entry.word, entry.offset) }
+            }
+            .min { lhs, rhs in
+                lhs.index != rhs.index ? lhs.index < rhs.index : lhs.word.count > rhs.word.count
+            }
+        guard let hit,
+              let day = calendar.date(
                 byAdding: .day,
-                value: entry.offset,
+                value: hit.offset,
                 to: calendar.startOfDay(for: now)
-            ) else { continue }
-            return (day, entry.word)
-        }
-        return nil
+              ) else { return nil }
+        return (day, hit.word)
     }
 
     private static func weekday(
