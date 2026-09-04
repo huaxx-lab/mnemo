@@ -372,7 +372,17 @@ public enum TodoRevisionPrompt {
             ?? (arguments["todo"] as? Int)
         let kind = string("kind").flatMap(TodoRevisionDecision.Kind.init(rawValue:)) ?? .general
         let needsConfirmation = (arguments["needsConfirmation"] as? Bool) ?? true
-        let evidence = string("evidence")
+        // 实测模型会给 evidence 套上原文没有的引号（"今天下午八点开会"）。
+        // 剥掉成对的弯/直引号再验证，别为一个格式差异丢掉整条待办。
+        let evidence = string("evidence").map { raw -> String in
+            let pairs: [(Character, Character)] = [("\"", "\""), ("\u{201C}", "\u{201D}"), ("\u{300C}", "\u{300D}")]
+            for (open, close) in pairs where raw.count >= 2
+                && raw.first == open && raw.last == close {
+                return String(raw.dropFirst().dropLast())
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            return raw
+        }
         let reason = string("reason") ?? ""
 
         switch call.name {
