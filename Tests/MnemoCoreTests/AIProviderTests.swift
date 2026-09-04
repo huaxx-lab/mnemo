@@ -1006,3 +1006,39 @@ func maxTokensUnchangedWithoutReasoning() async throws {
     #expect((body["max_tokens"] as? NSNumber)?.intValue == 220)
     #expect(body["thinking"] == nil)
 }
+
+// MARK: - 手机号遮蔽而不是整条拦下
+
+@Test("手机号只遮不拦，密钥和身份证照拦不误")
+func phoneNumbersAreRedactedRatherThanBlocking() {
+    let recruiting = "华为海思校招，感兴趣的联系微信：15205198887。周六下午部门主管来校交流。"
+    let screening = PrivacyFilter.screen(recruiting)
+    #expect(screening.matches.contains(.phoneNumber))
+    // 命中了，但不该因此整条拒发——招聘启事里带联系方式是常态，
+    // 为它拦下来的代价是"AI 检索完全不可用"。
+    #expect(screening.canSendExternally)
+
+    let redacted = PrivacyFilter.redacted(recruiting)
+    #expect(!redacted.contains("15205198887"), "\(redacted)")
+    // 上下文要留住，模型才知道这段在说什么。
+    #expect(redacted.contains("华为海思校招"), "\(redacted)")
+    #expect(redacted.contains("联系微信"), "\(redacted)")
+
+    // 真正的秘密仍然硬拦。
+    let secret = "线上环境 api_key-A1b2C3d4E5f6G7h8I9 别外传"
+    #expect(!PrivacyFilter.screen(secret).canSendExternally)
+    let password = "数据库 密码: hunter2xyz"
+    #expect(!PrivacyFilter.screen(password).canSendExternally)
+}
+
+@Test("同时命中手机号和密钥时，按密钥拦")
+func credentialsStillBlockEvenAlongsideAPhoneNumber() {
+    let mixed = "联系 13800138000，key_ABCDEFGHIJKLMNOPQRST"
+    let screening = PrivacyFilter.screen(mixed)
+    #expect(screening.matches.contains(.phoneNumber))
+    #expect(screening.matches.contains(.apiCredential))
+    #expect(!screening.canSendExternally)
+    // 拦下来的理由只报真正拦它的那一类，不把手机号也算进去——
+    // 否则用户看到的原因和实际原因对不上。
+    #expect(screening.blockingMatches == [.apiCredential])
+}

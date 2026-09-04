@@ -508,7 +508,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         workspacePanel = NotchWorkspacePanel(contentRect: workspaceFrame())
         workspacePanel.onCancel = { [weak self] in self?.model.requestClose() }
-        workspacePanel.contentView = NSHostingView(rootView: NotchWorkspaceRootView(model: model))
+        workspacePanel.contentView = FirstMouseHostingView(
+            rootView: NotchWorkspaceRootView(model: model)
+        )
 
         configureDetailPanel()
 

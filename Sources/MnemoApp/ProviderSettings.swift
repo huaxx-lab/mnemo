@@ -1600,11 +1600,17 @@ final class ProviderSettingsModel {
         var pendingText: [String] = []
         var pendingIndices: [String: [Int]] = [:]
 
-        for (index, text) in texts.enumerated() {
-            if !provider.isLocal, !allowSensitiveContent,
-               !PrivacyFilter.screen(text).canSendExternally {
-                results[index] = .privacyBlocked
-                continue
+        for (index, original) in texts.enumerated() {
+            var text = original
+            if !provider.isLocal, !allowSensitiveContent {
+                let screening = PrivacyFilter.screen(text)
+                guard screening.canSendExternally else {
+                    results[index] = .privacyBlocked
+                    continue
+                }
+                // 手机号遮掉再拿去做向量：留着不发是对的，但整条不建索引
+                // 等于这条内容永远搜不到。
+                if !screening.matches.isEmpty { text = PrivacyFilter.redacted(text) }
             }
             let key = embeddingCacheKey(
                 provider: provider,

@@ -63,6 +63,22 @@ enum CardGroupStore {
         return group.id
     }
 
+    /// 展开态下调整组内成员顺序。折叠态整组是一个实体，不会走到这里。
+    static func moveMember(_ itemID: UUID, before targetID: UUID, after: Bool) {
+        guard itemID != targetID,
+              let groupIndex = groups.firstIndex(where: {
+                  $0.itemIDs.contains(itemID) && $0.itemIDs.contains(targetID)
+              }) else { return }
+        var ids = groups[groupIndex].itemIDs
+        ids.removeAll { $0 == itemID }
+        guard var targetIndex = ids.firstIndex(of: targetID) else { return }
+        if after { targetIndex += 1 }
+        ids.insert(itemID, at: min(targetIndex, ids.count))
+        guard ids != groups[groupIndex].itemIDs else { return }
+        groups[groupIndex].itemIDs = ids
+        persist()
+    }
+
     /// 从所在的组里拿出来。组里只剩一张时整组解散——一张卡的"组"不是组。
     static func detach(_ itemID: UUID) {
         guard let index = groups.firstIndex(where: { $0.itemIDs.contains(itemID) }) else { return }
@@ -86,7 +102,8 @@ enum CardGroupStore {
     }
 
     /// 条目消失（删除、清空回收站）之后把悬空的成员清掉。
-    static func prune(keeping ids: Set<UUID>) {
+    @discardableResult
+    static func prune(keeping ids: Set<UUID>) -> Bool {
         var changed = false
         for index in groups.indices.reversed() {
             let kept = groups[index].itemIDs.filter { ids.contains($0) }
@@ -99,6 +116,7 @@ enum CardGroupStore {
             }
         }
         if changed { persist() }
+        return changed
     }
 
     private static func persist() {

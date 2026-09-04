@@ -161,10 +161,19 @@ public actor AIExecutionEngine {
             throw AIExecutionError.providerNotFound(configured.providerID)
         }
 
+        var system = system
+        var prompt = prompt
         if !provider.isLocal, !allowSensitiveContent, let privacyText {
             let screening = PrivacyFilter.screen(privacyText)
             guard screening.canSendExternally else {
-                throw AIExecutionError.privacyBlocked(screening.matches)
+                throw AIExecutionError.privacyBlocked(screening.blockingMatches)
+            }
+            // 拦不住的那几类已经在上面挡掉了；剩下能遮的（手机号）遮掉再发。
+            // 之前是整条拒发——一张带联系方式的招聘启事就能让整个检索不可用，
+            // 而那个号码本来也不是用户想藏的秘密，是他自己存下来的联系方式。
+            if !screening.matches.isEmpty {
+                prompt = PrivacyFilter.redacted(prompt)
+                system = system.map(PrivacyFilter.redacted)
             }
         }
 

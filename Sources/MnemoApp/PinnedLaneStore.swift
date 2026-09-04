@@ -57,11 +57,13 @@ enum PinnedLaneStore {
         persist()
     }
 
-    static func prune(keeping ids: Set<UUID>) {
+    @discardableResult
+    static func prune(keeping ids: Set<UUID>) -> Bool {
         let kept = ordered.filter { ids.contains($0) }
-        guard kept.count != ordered.count else { return }
+        guard kept.count != ordered.count else { return false }
         ordered = kept
         persist()
+        return true
     }
 
     private static func persist() {

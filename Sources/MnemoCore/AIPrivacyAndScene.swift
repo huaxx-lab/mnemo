@@ -10,12 +10,37 @@ public enum SensitiveContentKind: String, Codable, Sendable, Hashable {
 
 public struct PrivacyScreeningResult: Sendable, Equatable {
     public var matches: Set<SensitiveContentKind>
-    public var canSendExternally: Bool { matches.isEmpty }
+
+    /// 遮住就能安全外发的那几类。
+    ///
+    /// 手机号在正常内容里到处都是——招聘启事、快递通知、群公告，几乎每条都有。
+    /// 为它整条拦下来的代价是"AI 检索完全不可用"，而它本来也不是用户想藏的
+    /// 秘密（是他自己存下来的联系方式）。遮掉数字再发，模型照样读得懂上下文
+    /// （"联系微信：[已隐去]"），检索能用，号码也没出去。
+    ///
+    /// 密钥、密码、身份证、银行卡不在此列：那几类**存在本身**就是风险，
+    /// 而且遮掉之后剩下的上下文仍可能足够拼回去。它们继续硬拦。
+    public static let redactableKinds: Set<SensitiveContentKind> = [.phoneNumber]
+
+    public var blockingMatches: Set<SensitiveContentKind> {
+        matches.subtracting(Self.redactableKinds)
+    }
+
+    public var canSendExternally: Bool { blockingMatches.isEmpty }
 
     public init(matches: Set<SensitiveContentKind>) { self.matches = matches }
 }
 
 public enum PrivacyFilter {
+    /// 把能遮的那几类遮掉，其余原样。外发前统一过这一道。
+    public static func redacted(_ text: String) -> String {
+        text.replacingOccurrences(
+            of: #"(?<!\d)1[3-9]\d{9}(?!\d)"#,
+            with: "[电话已隐去]",
+            options: .regularExpression
+        )
+    }
+
     public static func screen(_ text: String) -> PrivacyScreeningResult {
         var matches: Set<SensitiveContentKind> = []
         if containsValidChineseID(text) { matches.insert(.chineseIdentityNumber) }

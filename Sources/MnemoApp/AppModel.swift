@@ -283,7 +283,11 @@ final class AppModel {
     /// 到货而改变——于是封面明明已经存进 `LinkCoverStore`，卡片还是空的，
     /// 要等切页签、滚走再回来把视图整个重建才显示。用户看到的就是
     /// "拖进去的链接要过一会才有预览图"。
-    private(set) var linkCoverGeneration = 0
+    /// 每条链接自己的封面代次。某一张封面回来，只重载那一张卡。
+    /// 全局 Int 会让所有可见卡（包括非链接）一起重跑 resolvedFileURL + 缩略图。
+    private(set) var linkCoverGenerations: [UUID: Int] = [:]
+
+    func linkCoverGeneration(for id: UUID) -> Int { linkCoverGenerations[id, default: 0] }
 
     func requestScrollToFirstCard() {
         scrollToFirstCardRequest &+= 1
@@ -296,9 +300,25 @@ final class AppModel {
     private(set) var isAnsweringPDF = false
     private(set) var pdfAnswer: String?
     private(set) var semanticHits: [SemanticSearchHit] = [] {
-        didSet { visibleItemsRevision &+= 1 }
+        didSet {
+            visibleItemsRevision &+= 1
+            semanticHitIndex = Dictionary(
+                semanticHits.map { ($0.itemID, $0) },
+                uniquingKeysWith: { first, _ in first }
+            )
+        }
     }
-    private(set) var retrievalRecommendations: [RetrievalRecommendation] = []
+    @ObservationIgnored private var semanticHitIndex: [UUID: SemanticSearchHit] = [:]
+
+    private(set) var retrievalRecommendations: [RetrievalRecommendation] = [] {
+        didSet {
+            retrievalRecommendationIndex = Dictionary(
+                retrievalRecommendations.map { ($0.itemID, $0) },
+                uniquingKeysWith: { first, _ in first }
+            )
+        }
+    }
+    @ObservationIgnored private var retrievalRecommendationIndex: [UUID: RetrievalRecommendation] = [:]
     private(set) var semanticQuery = ""
     private(set) var understoodSearchQuery: StructuredQuery?
     private(set) var isPerformingSemanticSearch = false
@@ -1014,10 +1034,44 @@ final class AppModel {
 
     /// 当前可见条目里的版本族。
     ///
-    /// 只对**文档类**做：图片和文字没有"同一份东西的第二版"这个概念，
-    /// 而链接的版本关系由平台自己管。
-    var versionFamilies: [DocumentVersionFamily] {
-        _ = documentTitleGeneration
+    /// 族、成员槽位、groupID→族三份结果在**一次**计算里生成并一起缓存。
+    /// 旧实现 `displayEntries` 对每一个 rank=1 的文档又重新调用一次
+    /// `versionFamilies`，每次都跑 O(n²) 的名字相似度；拖拽/悬停刷新 body 时
+    /// 这条路径会反复烧 CPU。
+    var versionFamilies: [DocumentVersionFamily] { versionSnapshot.families }
+
+    /// 条目 ID → 它在版本族里的位置。
+    struct VersionSlot: Equatable {
+        var groupID: UUID
+        /// 1 = 最新。
+        var rank: Int
+        var total: Int
+        var isExpanded: Bool
+    }
+
+    private struct VersionSnapshotKey: Equatable {
+        var visible: VisibleItemsKey
+        var documentTitleGeneration: Int
+        var expanded: [UUID]
+    }
+
+    private struct VersionSnapshot {
+        var key: VersionSnapshotKey
+        var families: [DocumentVersionFamily]
+        var familyByID: [UUID: DocumentVersionFamily]
+        var slots: [UUID: VersionSlot]
+    }
+
+    @ObservationIgnored private var versionSnapshotCache: VersionSnapshot?
+
+    private var versionSnapshot: VersionSnapshot {
+        let key = VersionSnapshotKey(
+            visible: visibleItemsKey,
+            documentTitleGeneration: documentTitleGeneration,
+            expanded: expandedVersionGroups.sorted { $0.uuidString < $1.uuidString }
+        )
+        if let cache = versionSnapshotCache, cache.key == key { return cache }
+
         let documents = visibleItems
             .filter { $0.kind == .pdf || $0.kind == .file }
             .map { item in
@@ -1030,35 +1084,15 @@ final class AppModel {
                     documentTitle: documentTitles[item.id]
                 )
             }
-        return DocumentVersioning.families(documents)
-    }
-
-    /// 条目 ID → 它在版本族里的位置。
-    struct VersionSlot: Equatable {
-        /// 这一族最新那版的 ID，同时是这一组的身份。
-        var groupID: UUID
-        /// 1 = 最新。
-        var rank: Int
-        var total: Int
-        var isExpanded: Bool
-    }
-
-    /// 上一次算出来的分族结果和它对应的输入。
-    ///
-    /// `versionSlots` 是**每张卡片各读一次**的，而分族内部要做两两比较。
-    /// 不缓存的话每帧的代价是 O(卡片数 × 文档数²)——一个几十条的库就能让
-    /// 滚动掉帧。输入没变就直接返回上一次的结果。
-    @ObservationIgnored private var versionSlotCache: (key: String, value: [UUID: VersionSlot])?
-
-    var versionSlots: [UUID: VersionSlot] {
-        let key = versionCacheKey
-        if let versionSlotCache, versionSlotCache.key == key { return versionSlotCache.value }
-        var result: [UUID: VersionSlot] = [:]
-        for family in versionFamilies {
+        let families = DocumentVersioning.families(documents)
+        var familyByID: [UUID: DocumentVersionFamily] = [:]
+        var slots: [UUID: VersionSlot] = [:]
+        for family in families {
             guard let groupID = family.orderedIDs.first else { continue }
+            familyByID[groupID] = family
             let isExpanded = expandedVersionGroups.contains(groupID)
             for (index, id) in family.orderedIDs.enumerated() {
-                result[id] = VersionSlot(
+                slots[id] = VersionSlot(
                     groupID: groupID,
                     rank: index + 1,
                     total: family.orderedIDs.count,
@@ -1066,19 +1100,14 @@ final class AppModel {
                 )
             }
         }
-        versionSlotCache = (key, result)
-        return result
+        let snapshot = VersionSnapshot(
+            key: key, families: families, familyByID: familyByID, slots: slots
+        )
+        versionSnapshotCache = snapshot
+        return snapshot
     }
 
-    /// 分族结果依赖什么：看得见哪些条目、首页标题读到第几轮、哪些组展开着。
-    private var versionCacheKey: String {
-        var key = "\(documentTitleGeneration)#"
-        for item in visibleItems where item.kind == .pdf || item.kind == .file {
-            key += item.id.uuidString + ","
-        }
-        key += "#" + expandedVersionGroups.map(\.uuidString).sorted().joined(separator: ",")
-        return key
-    }
+    var versionSlots: [UUID: VersionSlot] { versionSnapshot.slots }
 
     // MARK: - 钉住区
 
@@ -1125,13 +1154,42 @@ final class AppModel {
     func moveGroup(_ groupID: UUID, anchor target: UUID, after: Bool) {
         guard let group = cardGroups.first(where: { $0.id == groupID }),
               !group.itemIDs.contains(target) else { return }
-        var anchorID = target
-        var insertAfter = after
-        for id in group.itemIDs where items.contains(where: { $0.id == id }) {
-            moveItem(id, anchor: anchorID, after: insertAfter)
-            // 后面的成员依次跟在前一张后面，整组才是连续的一段。
-            anchorID = id
-            insertAfter = true
+        // 落点若在另一个组里，整摞要跨过那一组，不能停在它中间——否则两组的
+        // 卡片交错，各自都不再是连续的一段。
+        var target = target
+        if let host = cardGroup(of: target), host.id != groupID {
+            target = (after ? host.itemIDs.last : host.itemIDs.first) ?? target
+        }
+        let memberIDs = group.itemIDs.filter { id in items.contains(where: { $0.id == id }) }
+        guard !memberIDs.isEmpty else { return }
+
+        // **一次**算出最终顺序，一次写入。
+        //
+        // 之前在循环里逐步改 `items`：每改一次 UI 就刷新一帧，五张卡的组就是
+        // 五次连续的跳动——用户看到的就是"成员一张一张蹦过去"。先在纯 id 数组
+        // 上挪好，再整体落回 `items`，屏幕上是一步到位的，整组作为一个格子
+        // 被那条换位 spring 一起推过去。
+        var order = items.map(\.id)
+        let moving = Set(memberIDs)
+        order.removeAll { moving.contains($0) }
+        var index = order.firstIndex(of: target).map { $0 + (after ? 1 : 0) } ?? order.count
+        index = min(max(0, index), order.count)
+        order.insert(contentsOf: memberIDs, at: index)
+        guard order != items.map(\.id) else { return }
+        let byID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
+        items = order.compactMap { byID[$0] }
+
+        // 持久化：倒序逐张"挪到 X 前"。X 是已经放好的最终邻居，所以倒着来每一
+        // 步都成立；正着来的话，后面的计划里引用的锚点可能已经被挪走了。
+        // 内存里已经是最终状态，写库失败就 reload 拉回真实顺序。
+        let tailAnchor: UUID? = index + memberIDs.count < order.count
+            ? order[index + memberIDs.count] : nil
+        enqueueReorderPersistence { [library] in
+            var anchor = tailAnchor
+            for id in memberIDs.reversed() {
+                try await library.moveItem(id, before: anchor)
+                anchor = id
+            }
         }
     }
 
@@ -1226,23 +1284,40 @@ final class AppModel {
     /// 一次，而 `CardGroupStore.group(containing:)` 内部是一次全表扫描——
     /// 合起来就是 O(条目数 × 分组数)，每帧都跑。索引按分组代次缓存，
     /// 分组没变就不重建。
-    @ObservationIgnored private var cardGroupIndexCache: (generation: Int, value: [UUID: CardGroup])?
+    private struct CardGroupLookup {
+        var generation: Int
+        var byItemID: [UUID: CardGroup]
+        var byGroupID: [UUID: CardGroup]
+    }
 
-    var cardGroupIndex: [UUID: CardGroup] {
+    @ObservationIgnored private var cardGroupIndexCache: CardGroupLookup?
+
+    private var cardGroupLookup: CardGroupLookup {
         if let cache = cardGroupIndexCache, cache.generation == cardGroupGeneration {
-            return cache.value
+            return cache
         }
-        var index: [UUID: CardGroup] = [:]
+        var byItemID: [UUID: CardGroup] = [:]
+        var byGroupID: [UUID: CardGroup] = [:]
         for group in CardGroupStore.all() {
-            for id in group.itemIDs { index[id] = group }
+            byGroupID[group.id] = group
+            for id in group.itemIDs { byItemID[id] = group }
         }
-        cardGroupIndexCache = (cardGroupGeneration, index)
-        return index
+        let value = CardGroupLookup(
+            generation: cardGroupGeneration,
+            byItemID: byItemID,
+            byGroupID: byGroupID
+        )
+        cardGroupIndexCache = value
+        return value
     }
 
-    func cardGroup(of itemID: UUID) -> CardGroup? {
-        cardGroupIndex[itemID]
-    }
+    var cardGroupIndex: [UUID: CardGroup] { cardGroupLookup.byItemID }
+
+    func cardGroup(of itemID: UUID) -> CardGroup? { cardGroupLookup.byItemID[itemID] }
+
+    /// 按组 id 查，给高频 drop validation 用。拖拽期间每秒会问几十次，
+    /// 和 item→group 在同一代缓存里一次建好。
+    func cardGroupByID(_ groupID: UUID) -> CardGroup? { cardGroupLookup.byGroupID[groupID] }
 
     /// 把一张卡拖到另一张上：合成一组，或者加入对方已有的组。
     ///
@@ -1263,6 +1338,7 @@ final class AppModel {
         let created = CardGroupStore.merge(dragged, into: target, defaultName: defaultGroupName())
         cardGroupGeneration &+= 1
         guard let created else { return }
+        normalizeGroupMembers(created, around: target)
         // 不自动展开：合并之后用户多半还要接着拖第三张、第四张，展开的组占
         // 整条轨道，反而把要拖的那些挤出了视野。想看里面点一下就是。
         showTransientFeedback(existing == nil ? "已建分组" : "已加入分组")
@@ -1273,6 +1349,43 @@ final class AppModel {
         // 不弹输入框打断他：名字先自己长出来，右键随时能改。
         guard existing == nil else { return }
         nameGroupAutomatically(created)
+    }
+
+    /// 分组元数据和轨道顺序必须是同一个事实：成员在 canonical item order 里
+    /// 连续，而且顺序等于 CardGroup.itemIDs。
+    ///
+    /// 旧实现只写 CardGroupStore，不动 items：A、X、B 合并成 [B,A] 后，屏幕扫描
+    /// 到 A 就先画组，组出现在 A 的旧位置；再按 B/A 当边缘做换位，结果会跨过
+    /// 中间的 X。这里保留目标组原来的视觉位置，把成员一次归成连续块。
+    private func normalizeGroupMembers(_ groupID: UUID, around targetID: UUID) {
+        guard let group = cardGroups.first(where: { $0.id == groupID }) else { return }
+        let members = group.itemIDs.filter { id in items.contains(where: { $0.id == id }) }
+        guard members.count >= 2 else { return }
+        let memberSet = Set(members)
+        let oldOrder = items.map(\.id)
+        let originalAnchor = oldOrder.firstIndex(of: targetID)
+            ?? oldOrder.indices.first(where: { memberSet.contains(oldOrder[$0]) })
+            ?? oldOrder.endIndex
+        // 移除成员后，锚点前被移走了几个，就从原索引扣掉几个。
+        let removedBefore = oldOrder.prefix(originalAnchor).reduce(0) {
+            $0 + (memberSet.contains($1) ? 1 : 0)
+        }
+        var order = oldOrder.filter { !memberSet.contains($0) }
+        let insertion = min(max(0, originalAnchor - removedBefore), order.count)
+        order.insert(contentsOf: members, at: insertion)
+        guard order != oldOrder else { return }
+        let byID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
+        items = order.compactMap { byID[$0] }
+
+        let tailAnchor = insertion + members.count < order.count
+            ? order[insertion + members.count] : nil
+        enqueueReorderPersistence { [library] in
+            var anchor = tailAnchor
+            for id in members.reversed() {
+                try await library.moveItem(id, before: anchor)
+                anchor = id
+            }
+        }
     }
 
     private func nameGroupAutomatically(_ groupID: UUID) {
@@ -1328,8 +1441,11 @@ final class AppModel {
         guard cardGroup(of: itemID) == nil,
               let target = cardGroups.first(where: { $0.id == groups[index].id }),
               let anchor = target.itemIDs.first else { return }
-        CardGroupStore.merge(itemID, into: anchor, defaultName: target.name)
+        guard let groupID = CardGroupStore.merge(
+            itemID, into: anchor, defaultName: target.name
+        ) else { return }
         cardGroupGeneration &+= 1
+        normalizeGroupMembers(groupID, around: anchor)
         showTransientFeedback("已归入「\(target.name)」")
     }
 
@@ -1338,6 +1454,12 @@ final class AppModel {
         var index = 1
         while taken.contains("新分组 \(index)") { index += 1 }
         return "新分组 \(index)"
+    }
+
+    func moveGroupMember(_ itemID: UUID, before targetID: UUID, after: Bool) {
+        guard cardGroup(of: itemID)?.id == cardGroup(of: targetID)?.id else { return }
+        CardGroupStore.moveMember(itemID, before: targetID, after: after)
+        cardGroupGeneration &+= 1
     }
 
     func detachFromGroup(_ itemID: UUID) {
@@ -1466,7 +1588,7 @@ final class AppModel {
             // 拖进来存档），整摞不该因此跑到最前面去。
             guard slot.rank == 1, seenGroups.insert(slot.groupID).inserted else { continue }
             guard let collection = versionCollection(groupID: slot.groupID, count: slot.total),
-                  let family = versionFamilies.first(where: { $0.orderedIDs.first == slot.groupID })
+                  let family = versionSnapshot.familyByID[slot.groupID]
             else {
                 result.append(.item(item))
                 continue
@@ -1518,6 +1640,7 @@ final class AppModel {
               documentTitleLoads.insert(item.id).inserted else { return }
         Task { [weak self] in
             guard let self else { return }
+            defer { self.documentTitleLoads.remove(item.id) }
             let chunks = (try? await self.library.chunks(for: item.id)) ?? []
             // 只看第一页：标题一定在那儿，往后翻全是正文。
             let firstPage = chunks
@@ -1582,26 +1705,8 @@ final class AppModel {
         if let visibleItemsCache, visibleItemsCache.key == key { return visibleItemsCache.value }
         let value = computedVisibleItems
         visibleItemsCache = (key, value)
-        let fingerprint = value.map(\.id)
-        if fingerprint != lastOrderFingerprint {
-            lastOrderFingerprint = fingerprint
-            orderRevision &+= 1
-        }
         return value
     }
-
-    /// 卡片顺序的修订号，给动画当触发值。
-    ///
-    /// 原来写的是 `value: visibleItems.map(\.id)`：那一句每帧都要重算整份
-    /// 可见列表、再新建一个 UUID 数组去比较——动画本身成了这条路径上最贵的
-    /// 一部分。换成一个 Int，比较是常数时间，而且只有顺序真的变了才自增。
-    var visibleOrderRevision: Int {
-        _ = visibleItems
-        return orderRevision
-    }
-
-    @ObservationIgnored private var orderRevision = 0
-    @ObservationIgnored private var lastOrderFingerprint: [UUID] = []
 
     private var computedVisibleItems: [Item] {
         let base = visibleItemsIgnoringGroupFilter
@@ -1918,57 +2023,97 @@ final class AppModel {
         showTransientFeedback("这个 Pin 已经收好了")
     }
 
-    /// 往外拖时取消还没结算完的入库反馈，别让上一次的"已收纳"压在这次拖拽上。
+    /// 一次内部拖拽的身份。
     ///
-    /// 同时记下被拖的条目：卡片重排的 drop 代理直接读这个值，而不是去
-    /// 拖拽板上匹配自定义 UTI——自定义类型在 SwiftUI 的 drop 转换里不一定
-    /// 存活，而同一进程里的共享状态百分之百可靠。
-    var draggingItemID: UUID?
-    /// 正在拖的是一整个分组。分组不能被拖进别的分组——两组各自是用户归好的
-    /// 一个概念，合起来之后没有办法还原成原来的两堆。
-    var draggingGroupID: UUID?
+    /// 只允许一种：一张卡，或者一整个组。旧实现用两个 Optional（itemID +
+    /// groupID）表达三种状态，拖组还得拿第一张成员卡冒充 payload。任何一个
+    /// 清理点只清了其中一个，整个系统就把"拖组"降级成"拖第一张成员卡"。
+    /// 枚举让这种非法组合在类型层面不存在。
+    enum OutboundDrag: Equatable {
+        case item(UUID)
+        case group(UUID)
 
-    /// 拖拽结束（鼠标抬起）后清掉 draggingItemID 的一次性监听。
-    /// 延迟 150ms 清理：performDrop 在 drop 事件里同步读这个值，
-    /// 必须保证它先读到，监听到的抬起事件再清。
-    @ObservationIgnored private var dragEndMonitor: Any?
+        var itemID: UUID? {
+            if case .item(let id) = self { return id }
+            return nil
+        }
+        var groupID: UUID? {
+            if case .group(let id) = self { return id }
+            return nil
+        }
+    }
 
-    /// 这一次拖拽的编号。松手后的清理只能清掉**自己那一次**。
-    ///
-    /// 之前那个 150ms 的延迟清理既没存起来也没法取消：在有效目标外松手时
-    /// 没有任何 performDrop 会跑，于是清理被排上；用户紧接着抓起第二张卡开始
-    /// 拖，150ms 后旧任务把 `draggingItemID` 抹了——第二次拖动从此没有任何
-    /// 目标接得住（每个 validateDrop 都要求它非 nil），松手什么都不会发生。
+    private(set) var outboundDrag: OutboundDrag?
+    /// 兼容只关心"是不是一张卡"的现有界面读取。组不再冒充第一张卡。
+    var draggingItemID: UUID? { outboundDrag?.itemID }
+    var draggingGroupID: UUID? { outboundDrag?.groupID }
+    /// 鼠标抬起立刻自增。SwiftUI 只订阅它来清高亮 / 空位，不再自己装第二套
+    /// NSEvent monitor。
+    private(set) var dragEndSignal = 0
+
+    @ObservationIgnored private var localDragEndMonitor: Any?
+    @ObservationIgnored private var globalDragEndMonitor: Any?
+    @ObservationIgnored private var dragIdentityClearTask: Task<Void, Never>?
     @ObservationIgnored private var dragGeneration = 0
 
-    func beginOutboundDrag(itemID: UUID) {
+    func beginOutboundDrag(_ drag: OutboundDrag) {
         dragCompletionTask?.cancel()
         dragCompletionTask = nil
+        dragIdentityClearTask?.cancel()
         dragGeneration &+= 1
-        // 上一次拖拽的残留标记必须在这里清掉，不能指望那个延迟任务。
-        draggingGroupID = nil
-        draggingItemID = itemID
-        if let monitor = dragEndMonitor {
-            NSEvent.removeMonitor(monitor)
-            dragEndMonitor = nil
-        }
-        dragEndMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseUp, .rightMouseUp]) { [weak self] event in
-            guard let self, self.draggingItemID != nil else { return event }
-            if let monitor = self.dragEndMonitor {
-                NSEvent.removeMonitor(monitor)
-                self.dragEndMonitor = nil
-            }
-            let generation = self.dragGeneration
-            Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .milliseconds(150))
-                // 期间又开始了新的一次拖拽，就不是我该清的了。
-                guard let self, self.dragGeneration == generation else { return }
-                self.draggingItemID = nil
-                // 组标记和卡片标记同生共死。只清一个的话，下一次拖普通卡片
-                // 会被当成还在拖组。
-                self.draggingGroupID = nil
-            }
+        outboundDrag = drag
+        removeOutboundDragMonitors()
+
+        // DropDelegate.performDrop 要在 mouseUp 之后同步读身份，所以 mouseUp 先
+        // 只发视觉清理信号，身份下一拍再清。local 和 global 都装：在应用内 / 外
+        // 松手各由一条负责；两条都保存并一起删，绝不留下永久监听器。
+        localDragEndMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseUp, .rightMouseUp]
+        ) { [weak self] event in
+            self?.finishOutboundDragInput()
             return event
+        }
+        globalDragEndMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseUp, .rightMouseUp]
+        ) { [weak self] _ in
+            Task { @MainActor in self?.finishOutboundDragInput() }
+        }
+    }
+
+    func completeOutboundDrop() {
+        dragIdentityClearTask?.cancel()
+        outboundDrag = nil
+        dragEndSignal &+= 1
+        removeOutboundDragMonitors()
+    }
+
+    private func finishOutboundDragInput() {
+        guard outboundDrag != nil else { return }
+        dragEndSignal &+= 1
+        removeOutboundDragMonitors()
+        let generation = dragGeneration
+        dragIdentityClearTask?.cancel()
+        dragIdentityClearTask = Task { @MainActor [weak self] in
+            // 视觉状态已由 dragEndSignal 在 mouseUp 当下清掉；身份要多留一小段
+            // 给 SwiftUI 的 performDrop 读取。`Task.yield()` 只让出执行器，不保证
+            // 下一轮 run loop——它可能在 delegate 之前恢复，把一次合法投放变成
+            // nil。300ms 是取消 / 落到应用外时的兜底，正常投放会由
+            // completeOutboundDrop 当场清掉。generation 保证不误清下一次拖拽。
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled, let self, self.dragGeneration == generation else { return }
+            self.outboundDrag = nil
+            self.dragIdentityClearTask = nil
+        }
+    }
+
+    private func removeOutboundDragMonitors() {
+        if let localDragEndMonitor {
+            NSEvent.removeMonitor(localDragEndMonitor)
+            self.localDragEndMonitor = nil
+        }
+        if let globalDragEndMonitor {
+            NSEvent.removeMonitor(globalDragEndMonitor)
+            self.globalDragEndMonitor = nil
         }
     }
 
@@ -3997,8 +4142,16 @@ final class AppModel {
             let survivingItemIDs = Set(items.map(\.id)).union(trashedItems.map(\.id))
             NearbyDeviceOrigin.prune(keeping: survivingItemIDs)
             LinkSourceBrowserStore.prune(keeping: survivingItemIDs)
-            CardGroupStore.prune(keeping: survivingItemIDs)
-            PinnedLaneStore.prune(keeping: survivingItemIDs)
+            linkCoverGenerations = linkCoverGenerations.filter {
+                survivingItemIDs.contains($0.key)
+            }
+            if CardGroupStore.prune(keeping: survivingItemIDs) {
+                cardGroupGeneration &+= 1
+                cardGroupIndexCache = nil
+            }
+            if PinnedLaneStore.prune(keeping: survivingItemIDs) {
+                pinnedLaneGeneration &+= 1
+            }
             let survivingTodoIDs = Set(todos.map(\.id))
             TodoProvenanceStore.prune(
                 todoIDs: survivingTodoIDs,
@@ -4234,7 +4387,11 @@ final class AppModel {
         let sourceBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         do {
             let item = try await library.ingest(text: text)
-            LinkSourceBrowserStore.record(itemID: item.id, sourceBundleID: sourceBundleID)
+            if LinkSourceBrowserStore.record(itemID: item.id, sourceBundleID: sourceBundleID) {
+                // 同一条链接从另一个浏览器再次收纳，id 会复用，但它的"回哪个
+                // 浏览器"已经变了。按 id 缓存不清就一直显示旧浏览器图标。
+                linkBrowserCache[item.id] = nil
+            }
             if knownIDs.contains(item.id) {
                 report.reused = 1
                 scheduleAIWork(for: item)
@@ -4401,19 +4558,53 @@ final class AppModel {
     ///
     /// 持久化用的 before 目标是在**全量顺序**里算的——分类页签过滤掉谁，
     /// 都不该改变这次拖动的位置语义。
+    /// 所有排序写盘共用一条串行链。普通卡与整组若各起独立 Task，会交错写入
+    /// 同一组 sortOrder；屏幕上已经是新顺序，库里却可能最后落成旧顺序，下一次
+    /// reload 就回弹。链在 MainActor 上同步接长，调用顺序就是用户操作顺序。
+    @ObservationIgnored private var reorderPersistenceTask: Task<Void, Never>?
+
+    private func enqueueReorderPersistence(
+        _ operation: @escaping @MainActor () async throws -> Void
+    ) {
+        let previous = reorderPersistenceTask
+        reorderPersistenceTask = Task { @MainActor [weak self] in
+            _ = await previous?.result
+            guard !Task.isCancelled else { return }
+            do {
+                try await operation()
+            } catch {
+                await self?.reload()
+            }
+        }
+    }
+
     func moveItem(_ id: UUID, anchor targetID: UUID, after: Bool) {
+        guard let plan = reorderLocally(id, anchor: targetID, after: after) else { return }
+        enqueueReorderPersistence { [library] in
+            try await library.moveItem(plan.id, before: plan.beforeID)
+        }
+    }
+
+    /// 本地换位，返回这一步要怎么持久化。
+    ///
+    /// 拆出来是为了让**整组移动**可以先把本地顺序一次排好、再串行落盘。
+    /// 之前整组是"挪一张、发一次写盘"重复 N 遍：N 个 Task 并发跑，各自按
+    /// 自己那一刻的邻居算落点，写进库里的顺序和屏幕上的对不上；下一次
+    /// reload 一拉，整组又跳回去。用户看到的就是"先蹦出来一张卡，把它放回去
+    /// 之后组才跟过来"。
+    @discardableResult
+    private func reorderLocally(
+        _ id: UUID, anchor targetID: UUID, after: Bool
+    ) -> (id: UUID, beforeID: UUID?)? {
         guard id != targetID,
               let from = items.firstIndex(where: { $0.id == id }),
-              items.contains(where: { $0.id == targetID }) else { return }
+              items.contains(where: { $0.id == targetID }) else { return nil }
         let item = items.remove(at: from)
         var anchorIndex = items.firstIndex(where: { $0.id == targetID })!
         if after { anchorIndex += 1 }
         items.insert(item, at: anchorIndex)
         let beforeID = anchorIndex + 1 < items.count ? items[anchorIndex + 1].id : nil
-        Task {
-            do { try await library.moveItem(id, before: beforeID) }
-            catch { await reload() }   // 持久化失败就拉回真实顺序，不假装排好了
-        }
+        return (id, beforeID)
     }
 
     private func setClipboardPin(_ id: UUID, isPinned: Bool) async {
@@ -4622,7 +4813,7 @@ final class AppModel {
                 }
             }
             if changed {
-                self.linkCoverGeneration &+= 1
+                self.linkCoverGenerations[item.id, default: 0] &+= 1
                 await self.reload()
             }
         }
@@ -5127,11 +5318,11 @@ final class AppModel {
     }
 
     func semanticHit(for itemID: UUID) -> SemanticSearchHit? {
-        semanticHits.first { $0.itemID == itemID }
+        semanticHitIndex[itemID]
     }
 
     func retrievalRecommendation(for itemID: UUID) -> RetrievalRecommendation? {
-        retrievalRecommendations.first { $0.itemID == itemID }
+        retrievalRecommendationIndex[itemID]
     }
 
     func commitEdit(_ id: UUID, text: String) async {

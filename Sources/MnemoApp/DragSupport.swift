@@ -558,7 +558,21 @@ enum PinDragProvider {
     static let internalTypeIdentifier = "com.pinland.dragged-pin-id"
 
     static func make(item: Item, resolvedURL: URL?, model: AppModel) -> NSItemProvider {
-        model.beginOutboundDrag(itemID: item.id)
+        model.beginOutboundDrag(.item(item.id))
+        return provider(item: item, resolvedURL: resolvedURL)
+    }
+
+    /// 折叠组的专属拖拽载荷。只携带 groupID，不再拿第一张成员卡冒充。
+    /// 展开后成员卡仍走上面的 item payload；竖脊要拖整组时走这里。
+    static func make(groupID: UUID, name: String, model: AppModel) -> NSItemProvider {
+        model.beginOutboundDrag(.group(groupID))
+        let provider = NSItemProvider(object: name as NSString)
+        provider.suggestedName = name
+        attachInternalIdentity(groupID, to: provider)
+        return provider
+    }
+
+    private static func provider(item: Item, resolvedURL: URL?) -> NSItemProvider {
 
         if case .inline(let text) = item.holding {
             let provider = NSItemProvider(object: text as NSString)
@@ -684,4 +698,12 @@ enum PinFileStaging {
         for url in directories.prefix(excess) { try? FileManager.default.removeItem(at: url) }
         directories.removeFirst(excess)
     }
+}
+
+/// 工作台浮在别的应用上方，用户回过来点翻页按钮时 Mnemo 可能不是 active app。
+/// NSHostingView 默认会把第一下只用于激活窗口，按钮要第二下才收到——这就是
+/// 「左右按钮有时点两次」的另一条来源。工作台里的控件都应该接受 first mouse。
+@MainActor
+final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }

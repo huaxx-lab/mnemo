@@ -72,6 +72,22 @@ enum LinkOpener {
         var id: String { bundleID }
     }
 
+    /// bundle id → 应用 URL。正负结果都缓存：卡片的 tooltip 每帧都会问，
+    /// 不缓存 nil 时，卸载过的浏览器会每帧重查 Launch Services。
+    private static var appURLCache: [String: URL] = [:]
+    private static var missingAppURLs: Set<String> = []
+
+    private static func appURL(_ bundleID: String) -> URL? {
+        if let cached = appURLCache[bundleID] { return cached }
+        if missingAppURLs.contains(bundleID) { return nil }
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
+            missingAppURLs.insert(bundleID)
+            return nil
+        }
+        appURLCache[bundleID] = url
+        return url
+    }
+
     /// 按名字排序，稳定可预期。系统默认那个排在最前——多数人就用它。
     static var installedBrowsers: [InstalledBrowser] {
         let systemDefault = URL(string: "https://example.com")
@@ -79,8 +95,7 @@ enum LinkOpener {
             .flatMap { Bundle(url: $0)?.bundleIdentifier }
         return browserBundleIDs
             .compactMap { bundleID -> InstalledBrowser? in
-                guard let url = NSWorkspace.shared
-                    .urlForApplication(withBundleIdentifier: bundleID) else { return nil }
+                guard let url = appURL(bundleID) else { return nil }
                 return InstalledBrowser(bundleID: bundleID, name: appName(at: url), appURL: url)
             }
             .sorted { lhs, rhs in
@@ -91,7 +106,7 @@ enum LinkOpener {
     }
 
     static func browserName(_ bundleID: String) -> String? {
-        NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID).map(appName(at:))
+        appURL(bundleID).map(appName(at:))
     }
 
     /// 浏览器自己的应用图标。卡片上那枚小徽标用它——不自己画图标，
@@ -103,9 +118,7 @@ enum LinkOpener {
 
     static func browserIcon(_ bundleID: String) -> NSImage? {
         if let cached = iconCache[bundleID] { return cached }
-        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
-            return nil
-        }
+        guard let url = appURL(bundleID) else { return nil }
         let icon = NSWorkspace.shared.icon(forFile: url.path)
         iconCache[bundleID] = icon
         return icon
@@ -129,7 +142,7 @@ enum LinkOpener {
     @discardableResult
     static func openInBrowser(_ url: URL, bundleID: String?) -> String {
         if let bundleID,
-           let browser = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+           let browser = appURL(bundleID) {
             NSWorkspace.shared.open(
                 [url], withApplicationAt: browser, configuration: NSWorkspace.OpenConfiguration()
             )
@@ -170,7 +183,7 @@ enum LinkOpener {
         // 没有对应 App：回到当初拖进来的那个浏览器。用户在哪儿看到的就在哪儿
         // 打开——登录态、扩展、书签都在那边，换一个浏览器等于换了个环境。
         if let bundleID = preferredBrowserBundleID,
-           let browser = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+           let browser = appURL(bundleID) {
             NSWorkspace.shared.open([url], withApplicationAt: browser, configuration: configuration)
             return appName(at: browser)
         }
@@ -182,7 +195,7 @@ enum LinkOpener {
     static func destinationName(for url: URL, preferredBrowserBundleID: String?) -> String {
         if let app = nativeApp(for: url) { return appName(at: app) }
         if let bundleID = preferredBrowserBundleID,
-           let browser = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+           let browser = appURL(bundleID) {
             return appName(at: browser)
         }
         return "默认浏览器"
@@ -229,11 +242,13 @@ enum LinkSourceBrowserStore {
     }()
 
     /// 记下来源。非浏览器一律忽略。
-    static func record(itemID: UUID, sourceBundleID: String?) {
+    @discardableResult
+    static func record(itemID: UUID, sourceBundleID: String?) -> Bool {
         guard let sourceBundleID, LinkOpener.isBrowser(sourceBundleID),
-              map[itemID] != sourceBundleID else { return }
+              map[itemID] != sourceBundleID else { return false }
         map[itemID] = sourceBundleID
         persist()
+        return true
     }
 
     /// 读的时候再判一次"它还是不是浏览器"。
