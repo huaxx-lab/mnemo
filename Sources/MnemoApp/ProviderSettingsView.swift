@@ -1543,6 +1543,58 @@ private struct AppearanceSettingsPage: View {
                 }
 
                 SettingsCard(
+                    title: "开机自启",
+                    subtitle: "登录后自动在刘海里待命",
+                    help: "由系统的登录项管理，你也可以在「系统设置 → 通用 → 登录项」里看到并关掉。"
+                ) {
+                    Toggle("开机时自动启动 Mnemo", isOn: $appModel.launchesAtLogin)
+                        .font(.system(size: 12, weight: .medium))
+                    if LaunchAtLogin.isBlockedBySystem {
+                        Label("系统里被禁用了，需要到「系统设置 → 通用 → 登录项」放行",
+                              systemImage: "exclamationmark.triangle.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.orange)
+                    }
+                }
+
+                SettingsCard(
+                    title: "自动归入分组",
+                    subtitle: "新内容如果明显属于某个已建好的分组，就自己归进去",
+                    help: "模型只能在你已经建好的分组里选，建组永远是你的动作；拿不准时它什么都不做。触发时机和检索索引一样——随手复制的临时内容不会每次都去问。"
+                ) {
+                    Toggle("自动归入已有分组", isOn: $appModel.autoGroupingEnabled)
+                        .font(.system(size: 12, weight: .medium))
+                    Text(appModel.autoGroupingEnabled
+                         ? "拖进来的内容会自己找位置；归错了拖出来就行"
+                         : "只按你手动拖出来的分组归类")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                }
+
+                SettingsCard(
+                    title: "默认浏览器",
+                    subtitle: "链接没有对应 App 时用哪个浏览器打开",
+                    help: "「跟随来源」会记住每条链接当初是从哪个浏览器拖进来的——登录态、扩展、书签都在那边。指定一个之后它一律优先。"
+                ) {
+                    VStack(spacing: 8) {
+                        BrowserChoiceRow(
+                            name: "跟随来源",
+                            detail: "从哪个浏览器拖进来的，就回哪个去（默认）",
+                            icon: nil,
+                            isSelected: appModel.preferredBrowserBundleID == nil
+                        ) { appModel.preferredBrowserBundleID = nil }
+                        ForEach(LinkOpener.installedBrowsers) { browser in
+                            BrowserChoiceRow(
+                                name: browser.name,
+                                detail: browser.bundleID,
+                                icon: LinkOpener.browserIcon(browser.bundleID),
+                                isSelected: appModel.preferredBrowserBundleID == browser.bundleID
+                            ) { appModel.preferredBrowserBundleID = browser.bundleID }
+                        }
+                    }
+                }
+
+                SettingsCard(
                     title: "刘海展开方式",
                     subtitle: "用什么手势把工作台从刘海里拉出来",
                     help: "悬停要求指针在刘海上停住约 0.4 秒才展开，扫过去不算。刘海正下方就是菜单栏，默认只认点击，避免路过时被面板挡住。"
@@ -1574,6 +1626,59 @@ private struct AppearanceSettingsPage: View {
             .padding(24)
             .frame(maxWidth: 760, alignment: .leading)
         }
+    }
+}
+
+/// 默认浏览器的一行选项。图标用浏览器自己的应用图标——用户在 Dock 里看到的
+/// Chrome 是什么样，这里就该是什么样，不自己画一套。
+private struct BrowserChoiceRow: View {
+    let name: String
+    let detail: String
+    let icon: NSImage?
+    let isSelected: Bool
+    let select: () -> Void
+
+    var body: some View {
+        Button(action: select) {
+            HStack(spacing: 10) {
+                Image(systemName: isSelected ? "largecircle.fill.circle" : "circle")
+                    .font(.system(size: 12))
+                    .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+                if let icon {
+                    Image(nsImage: icon)
+                        .resizable()
+                        .interpolation(.high)
+                        .frame(width: 18, height: 18)
+                } else {
+                    Image(systemName: "arrow.uturn.backward.circle")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 18, height: 18)
+                }
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(name).font(.system(size: 12, weight: .medium))
+                    Text(detail)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                isSelected ? SettingsPalette.selection : SettingsPalette.control,
+                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(isSelected ? Color.accentColor : .clear)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 

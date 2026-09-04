@@ -1419,18 +1419,346 @@ private struct IconButton: View {
 /// 被拖的是哪张卡不读拖拽板——自定义 UTI 在 SwiftUI 的 drop 类型转换里
 /// 不一定存活。拖动开始时 AppModel.draggingItemID 已经记下了，同一进程
 /// 里的共享状态百分之百可靠；拖拽板只负责把内容拖出到别的应用。
+/// 「拖到这儿就离开当前的区」的提示。
+private struct DetachHint: View {
+    let active: Bool
+
+    var body: some View {
+        if active {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(
+                    Style.warning.opacity(0.7),
+                    style: StrokeStyle(lineWidth: 1.5, dash: [5, 4])
+                )
+                .overlay {
+                    Label("拖到这里移出分组", systemImage: "folder.badge.minus")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Style.warning)
+                }
+                .padding(4)
+                .transition(.opacity)
+        }
+    }
+}
+
+/// 松手就会并进去的那个目标的高亮。
+///
+/// 单独拆出来不是为了复用——是因为把这一整串 overlay 内联在 ForEach 里会让
+/// Swift 的类型检查器在那条表达式上直接超时。视图嵌套一深就要拆，这是硬约束。
+private struct MergeHalo: View {
+    let active: Bool
+    var radius: CGFloat = Style.cardRadius
+    var label: String = "并成一组"
+
+    var body: some View {
+        if active {
+            let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
+            shape
+                .fill(Style.cool.opacity(0.14))
+                .overlay { shape.strokeBorder(Style.cool, lineWidth: 2) }
+                .overlay(alignment: .top) { badge }
+        }
+    }
+
+    private var badge: some View {
+        Label(label, systemImage: "folder.badge.plus")
+            .font(.system(size: 9.5, weight: .semibold))
+            .foregroundStyle(Style.cool)
+            .padding(.horizontal, 7)
+            .frame(height: 18)
+            .background(Style.ink.opacity(0.85), in: Capsule())
+            .padding(.top, 6)
+    }
+}
+
+/// 轨道最前面那道看不见的边界：拖过来就钉住。
+///
+/// 平时完全透明、不占宽度感知——它是一条"意图"而不是一个控件。只有当手里
+/// 真的拖着一张还没钉住的卡时才亮起来（蓝色），因为只有那时候它才有事可做。
+private struct PinBoundaryDropDelegate: DropDelegate {
+    @Bindable var model: AppModel
+    @Binding var isTargeted: Bool
+
+    /// 能不能跨进钉住区。
+    ///
+    /// 判据是**位置**，不是身份：这道边界就画在第一张卡前面，指针能落到它
+    /// 身上，本身就说明这次拖动已经越过了所有卡片，也就是"排到了普通区
+    /// 第一张，再往左一步"。
+    ///
+    /// 一开始写成了"这张卡本身已经是第一张"，那要求用户先松手、再拖第二次
+    /// 才钉得住——中间那次松手没有任何意义，纯粹是实现细节漏到了操作里。
+    private var canPin: Bool {
+        guard model.draggingGroupID == nil, let id = model.draggingItemID else { return false }
+        return !model.isPinnedToFront(id)
+    }
+
+    func validateDrop(info: DropInfo) -> Bool { canPin }
+
+    func dropEntered(info: DropInfo) {
+        if canPin { isTargeted = true }
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        guard canPin else { return nil }
+        return DropProposal(operation: .move)
+    }
+
+    func dropExited(info: DropInfo) { isTargeted = false }
+
+    func performDrop(info: DropInfo) -> Bool {
+        guard let id = model.draggingItemID, !model.isPinnedToFront(id) else { return false }
+        isTargeted = false
+        model.draggingItemID = nil
+        // 钉到最前面那一格，而不是钉住区的末尾——用户刚把它拖到了最左边。
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.78)) {
+            model.pinToFront(id, before: model.pinnedLaneIDs.first)
+        }
+        return true
+    }
+}
+
+/// 轨道最前面那道边界。
+///
+/// 三种样子，对应它此刻在说的三句话：
+/// - 什么都没拖：一条几乎看不见的暗线（有钉住的卡时才画，否则连它都不该占位）
+/// - 拖着一张没钉住的卡：**蓝**，而且撑开一个空位——前面的卡片自动让开，
+///   这是"放这儿"最直白的表达，不需要任何文字
+/// - 拖着一张已钉住的卡：**红**，意思是"你正要离开这一区"
+private struct PinBoundary: View {
+    @Bindable var model: AppModel
+    let isTargeted: Bool
+    /// 正拖着一张已钉住的卡、而且指针已经落在普通区里。
+    let leavingZone: Bool
+    let height: CGFloat
+
+    /// 边界只在**此刻真的能做点什么**的时候才现身。
+    ///
+    /// 一开始写成"只要在拖东西就亮起来"，那是把一个随时待命的控件摆在那儿：
+    /// 手里刚拿起一张卡，左边就冒出一条线，而那时候它离得还很远、按不到，
+    /// 纯粹是干扰。现在只有两种情况画它——指针真落到边界上（要钉进去），
+    /// 或者拖着一张已钉住的卡落到了普通区（要放出来）。移开就自动收起。
+    private var state: BoundaryHighlight {
+        guard model.draggingGroupID == nil, model.draggingItemID != nil else { return .none }
+        if isTargeted { return .pinning }
+        return leavingZone ? .unpinning : .none
+    }
+
+    private var isDraggingSomething: Bool { model.draggingItemID != nil }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            // 空位开在线的**左边**：钉住区在这条线左侧，松手之后卡片会落到
+            // 那里。开在右边等于把它推向普通区，方向正好相反——之前就是这么
+            // 写的，看起来只是"第一张卡离边界远了一点"，谁都读不出发生了什么。
+            Color.clear.frame(width: state == .pinning ? PinCard.width * 0.62 : 0)
+            Capsule()
+                .fill(color)
+                .frame(width: state == .pinning ? 4 : 3)
+                .frame(height: height * (isDraggingSomething ? 1 : 0.7))
+                .overlay {
+                    if state == .pinning {
+                        Capsule().fill(Style.cool).blur(radius: 5).opacity(0.6)
+                    }
+                }
+                // 画出来只有三四点宽，但拖动时得够得着。透明的外扩只在
+                // 手里有东西时才占位，平时不吃掉卡片的地方。
+                //
+                // 命中区一直在，看不看得见是另一回事：用户往左拖过第一张卡
+                // 就会碰到它，碰到的那一刻才亮——这正是"到了那个位置才显示"。
+                .padding(.horizontal, isDraggingSomething ? 9 : 0)
+                .contentShape(Rectangle())
+
+        }
+        .animation(.spring(response: 0.3, dampingFraction: 0.78), value: state)
+        .animation(.easeOut(duration: 0.18), value: isDraggingSomething)
+        .help("拖到这里钉在最前面")
+    }
+
+    private var color: Color {
+        switch state {
+        // 静息态：有钉住的卡时留一条淡线把两区分开，没有就完全隐身——
+        // 一个还没被用到的功能不该在界面上占位置。
+        case .none: model.pinnedLaneIDs.isEmpty ? .clear : Style.cool.opacity(0.32)
+        case .pinning: Style.cool
+        case .unpinning: Style.warning
+        }
+    }
+}
+
+/// 边界此刻在说什么。蓝＝拖进来会被钉住，红＝拖出去会取消钉住。
+enum BoundaryHighlight: Equatable {
+    case none
+    case pinning
+    case unpinning
+}
+
+/// 往一个已有分组里拖卡片。
+///
+/// 分组卡片自己也得能接住拖放，否则第一次合并之后就再也加不进第三张——
+/// 组渲染成了另一种视图，而排序用的那个 delegate 只挂在普通卡片上。
+private struct CardGroupDropDelegate: DropDelegate {
+    let group: CardGroup
+    @Bindable var model: AppModel
+    @Binding var mergeTargetID: UUID?
+    @Binding var reorderTargetID: UUID?
+    @Binding var insertAfter: Bool
+
+    private var draggedID: UUID? { model.draggingItemID }
+    /// 组和卡片用同一条分区规则：中段并进去，两侧插旁边。整套拖拽只有
+    /// 一个心智模型——松手的位置决定发生什么。
+    private static let mergeZone: ClosedRange<CGFloat> = 0.3...0.7
+
+    private var width: CGFloat { PinCard.width + 20 }
+
+    private func canMerge(_ x: CGFloat) -> Bool {
+        guard model.draggingGroupID == nil, let draggedID,
+              !group.itemIDs.contains(draggedID) else { return false }
+        return Self.mergeZone.contains(x / width)
+    }
+
+    private var canReorder: Bool {
+        guard let draggedID else { return false }
+        return !group.itemIDs.contains(draggedID)
+    }
+
+    func validateDrop(info: DropInfo) -> Bool { canReorder }
+
+    func dropEntered(info: DropInfo) {
+        guard canReorder else { return }
+        insertAfter = info.location.x > width / 2
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        guard canReorder else { return nil }
+        if canMerge(info.location.x) {
+            if mergeTargetID != group.id { mergeTargetID = group.id }
+            if reorderTargetID != nil { reorderTargetID = nil }
+            return DropProposal(operation: .copy)
+        }
+        if mergeTargetID == group.id { mergeTargetID = nil }
+        if reorderTargetID != group.id { reorderTargetID = group.id }
+        let next = info.location.x > width / 2
+        if next != insertAfter { insertAfter = next }
+        return DropProposal(operation: .move)
+    }
+
+    func dropExited(info: DropInfo) {
+        if mergeTargetID == group.id { mergeTargetID = nil }
+        if reorderTargetID == group.id { reorderTargetID = nil }
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        guard let draggedID, !group.itemIDs.contains(draggedID) else { return false }
+        let merging = canMerge(info.location.x)
+        let after = insertAfter
+        let draggedGroup = model.draggingGroupID
+        mergeTargetID = nil
+        reorderTargetID = nil
+        model.draggingItemID = nil
+        model.draggingGroupID = nil
+        if merging, let anchor = group.itemIDs.first {
+            model.mergeCards(draggedID, into: anchor)
+            return true
+        }
+        guard let anchor = group.itemIDs.first else { return false }
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+            if let draggedGroup {
+                model.moveGroup(draggedGroup, anchor: anchor, after: after)
+            } else {
+                model.moveCard(draggedID, anchor: anchor, after: after)
+            }
+        }
+        return true
+    }
+}
+
+/// 把卡片拖到轨道空白处 = 移出分组。
+///
+/// 这一层铺在所有卡片**后面**，只有落空的投放才会到它这里：拖到别的卡片上是
+/// 合并或排序，那些 delegate 会先接住。所以"拖出来"和"拖到别处"用的是同一个
+/// 动作，区别只在松手的位置——和手机上把图标从文件夹里拖到桌面完全一致。
+private struct GroupDetachDropDelegate: DropDelegate {
+    @Bindable var model: AppModel
+    @Binding var isDetaching: Bool
+    @Binding var boundary: BoundaryHighlight
+
+    /// 落在空白处意味着什么，取决于手里拖的是什么：分组里的卡是"拿出来"，
+    /// 钉住的卡是"松开钉子"。两者都是"离开它现在待的那个区"，所以共用一个
+    /// 投放层——用户的动作是同一个，没必要让他记住两个不同的落点。
+    private enum Intent { case none, detachGroup, unpin }
+
+    private var intent: Intent {
+        guard model.draggingGroupID == nil, let id = model.draggingItemID else { return .none }
+        if model.cardGroup(of: id) != nil { return .detachGroup }
+        if model.isPinnedToFront(id) { return .unpin }
+        return .none
+    }
+
+    func validateDrop(info: DropInfo) -> Bool { intent != .none }
+
+    func dropEntered(info: DropInfo) {
+        switch intent {
+        case .none: break
+        case .detachGroup: isDetaching = true
+        case .unpin: boundary = .unpinning
+        }
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        guard intent != .none else { return nil }
+        return DropProposal(operation: .move)
+    }
+
+    func dropExited(info: DropInfo) {
+        isDetaching = false
+        if boundary == .unpinning { boundary = .none }
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        guard let id = model.draggingItemID else { return false }
+        let action = intent
+        isDetaching = false
+        boundary = .none
+        model.draggingItemID = nil
+        switch action {
+        case .none: return false
+        case .detachGroup: model.detachFromGroup(id)
+        case .unpin: model.unpinFromFront(id)
+        }
+        return true
+    }
+}
+
 private struct PinReorderDropDelegate: DropDelegate {
     let targetID: UUID
     let canReorder: Bool
     @Bindable var model: AppModel
     @Binding var reorderTargetID: UUID?
     @Binding var insertAfter: Bool
+    /// 松手就会合并的那张卡。指针停在中段时点亮它。
+    @Binding var mergeTargetID: UUID?
     let perform: (UUID, UUID, Bool) -> Void
 
     private var draggedID: UUID? { model.draggingItemID }
 
     func validateDrop(info: DropInfo) -> Bool {
         canReorder && draggedID != nil && draggedID != targetID
+    }
+
+    /// 卡片中段这一块是"合并"，两侧是"排序"。
+    ///
+    /// 用位置分区而不是 iOS 那种"悬停一会儿才成组"：横向轨道上拖一张卡去
+    /// 远处，路上必然扫过好几张卡，靠停留计时会一路误触发。而按位置分区时，
+    /// **只有松手的那一刻才算数**——路过多少张都无所谓。
+    private static let mergeZone: ClosedRange<CGFloat> = 0.34...0.66
+
+    private func isMergePosition(_ x: CGFloat) -> Bool {
+        Self.mergeZone.contains(x / PinCard.width)
+    }
+
+    /// 能不能合。整组不能被拖进别的组，见 `AppModel.mergeCards`。
+    private var canMerge: Bool {
+        model.draggingGroupID == nil && model.draggingItemID != nil
     }
 
     /// 翻面的迟滞死区。
@@ -1458,6 +1786,16 @@ private struct PinReorderDropDelegate: DropDelegate {
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
         guard validateDrop(info: info) else { return nil }
+        let merging = canMerge && isMergePosition(info.location.x)
+        if merging {
+            if mergeTargetID != targetID { mergeTargetID = targetID }
+            // 合并时不画插入竖线：那根线说的是"插到这两张中间"，
+            // 和"并进这一张里"是相反的意思，同时出现会互相拆台。
+            if reorderTargetID != nil { reorderTargetID = nil }
+            return DropProposal(operation: .copy)
+        }
+        if mergeTargetID == targetID { mergeTargetID = nil }
+        if reorderTargetID != targetID { reorderTargetID = targetID }
         let next = resolvedInsertAfter(info.location.x)
         // dropUpdated 每秒调用几十次。值没变就别写回去——写一次就是一次
         // 视图刷新，那本身也是抖动的来源之一。
@@ -1467,12 +1805,34 @@ private struct PinReorderDropDelegate: DropDelegate {
 
     func dropExited(info: DropInfo) {
         if reorderTargetID == targetID { reorderTargetID = nil }
+        if mergeTargetID == targetID { mergeTargetID = nil }
     }
 
     func performDrop(info: DropInfo) -> Bool {
         guard canReorder, let id = draggedID, id != targetID else { return false }
+        // 拖的是一整个组：它的负载用的是组里第一张卡，不特判的话这里会把
+        // 整组的移动当成"挪了那一张卡"，其余成员留在原地，组又跳回去了。
+        if let groupID = model.draggingGroupID {
+            let after = insertAfter
+            reorderTargetID = nil
+            mergeTargetID = nil
+            model.draggingItemID = nil
+            model.draggingGroupID = nil
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                model.moveGroup(groupID, anchor: targetID, after: after)
+            }
+            return true
+        }
+        if canMerge, isMergePosition(info.location.x) {
+            mergeTargetID = nil
+            reorderTargetID = nil
+            model.draggingItemID = nil
+            model.mergeCards(id, into: targetID)
+            return true
+        }
         let after = insertAfter
         reorderTargetID = nil
+        mergeTargetID = nil
         model.draggingItemID = nil
         perform(id, targetID, after)
         return true
@@ -1487,7 +1847,12 @@ private struct StashWorkspace: View {
     @State private var reorderTargetID: UUID?
     @State private var reorderInsertAfter = false
     @State private var privacyDropTargeted = false
+    @State private var mergeTargetID: UUID?
+    @State private var isDetachingFromGroup = false
+    @State private var boundaryHighlight: BoundaryHighlight = .none
+    @State private var isOverPinBoundary = false
     @State private var platformRowExpanded = false
+    @State private var folderRowExpanded = false
     @State private var edgeScrollTask: Task<Void, Never>?
 
     /// 搜索出结果时上半屏是模型的回答，下半屏是它推荐的真实 Pin。
@@ -1510,6 +1875,12 @@ private struct StashWorkspace: View {
 
     private var cardTrackHeight: CGFloat {
         max(91, NotchLayout.workspaceContentHeight - answerViewportHeight - 1)
+    }
+
+    /// 这一格属于钉住区吗。组和版本合集不参与钉住（钉住会先把卡从组里拿出来）。
+    private func isPinnedEntry(_ entry: AppModel.DisplayEntry) -> Bool {
+        if case .item(let item) = entry { return model.isPinnedToFront(item.id) }
+        return false
     }
 
     /// 检索结果按相关度排序，在那里重排没有意义——只允许浏览态下拖。
@@ -1540,7 +1911,36 @@ private struct StashWorkspace: View {
                 ScrollViewReader { proxy in
                     ScrollView(.horizontal, showsIndicators: false) {
                         LazyHStack(spacing: 8) {
-                            ForEach(model.displayEntries) { entry in
+                            // 一次取好，循环里查表。原来每张卡都调一次
+                            // `model.versionSlots`，而它内部要按可见列表重算
+                            // 缓存键——一屏几十张卡就是几十遍全表扫描。
+                            let slots = model.versionSlots
+                            let entries = model.displayEntries
+                            // 分界线画在**两区之间**，不是轨道最前面。
+                            //
+                            // 一开始把它焊在了队首，钉住区一有卡片就不对了：
+                            // 那条线跑到了钉住的卡片前面，而它要分开的两拨东西
+                            // 都在它右边。它标的是"这儿往左是钉住区"，所以
+                            // 位置只能是钉住区最后一张之后。
+                            let firstLoose = entries.firstIndex { !isPinnedEntry($0) }
+                                ?? entries.count
+                            ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
+                                if index == firstLoose {
+                                    PinBoundary(
+                                        model: model,
+                                        isTargeted: isOverPinBoundary,
+                                        leavingZone: boundaryHighlight == .unpinning,
+                                        height: isAnswering
+                                            ? max(78, cardTrackHeight - 16) : PinCard.height
+                                    )
+                                    .onDrop(
+                                        of: [UTType.data],
+                                        delegate: PinBoundaryDropDelegate(
+                                            model: model,
+                                            isTargeted: $isOverPinBoundary
+                                        )
+                                    )
+                                }
                                 switch entry {
                                 case .family(let collection, let members):
                                     VersionAccordion(
@@ -1552,10 +1952,64 @@ private struct StashWorkspace: View {
                                             : PinCard.height
                                     )
                                     .id(collection.id)
-                                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                                    .transition(.opacity)
+                                case .cardGroup(let group, let members):
+                                    CardGroupAccordion(
+                                        group: group,
+                                        members: members,
+                                        model: model,
+                                        availableHeight: isAnswering
+                                            ? max(78, cardTrackHeight - 16)
+                                            : PinCard.height
+                                    )
+                                    .id(group.id)
+                                    .transition(.opacity)
+                                    // 组自己也要能接住拖放，否则第一次合并之后
+                                    // 就再也加不进第三张：组渲染成了另一种视图，
+                                    // 而排序那个 delegate 只挂在普通卡片上。
+                                    .overlay {
+                                        MergeHalo(
+                                            active: mergeTargetID == group.id,
+                                            radius: Style.cardRadius + 4,
+                                            label: "放进「\(group.name)」"
+                                        )
+                                        .animation(
+                                            .spring(response: 0.22, dampingFraction: 0.75),
+                                            value: mergeTargetID == group.id
+                                        )
+                                    }
+                                    .scaleEffect(mergeTargetID == group.id ? 1.03 : 1)
+                                    .onDrop(
+                                        of: [UTType.data],
+                                        delegate: CardGroupDropDelegate(
+                                            group: group,
+                                            model: model,
+                                            mergeTargetID: $mergeTargetID,
+                                            reorderTargetID: $reorderTargetID,
+                                            insertAfter: $reorderInsertAfter
+                                        )
+                                    )
+                                    // 组也要能被拖走。位置本来就是用户排的，
+                                    // 归成一组之后反而挪不动，那是退化。
+                                    .onDrag {
+                                        model.draggingGroupID = group.id
+                                        return PinDragProvider.make(
+                                            item: members[0], resolvedURL: nil, model: model
+                                        )
+                                    }
+                                    .overlay(alignment: .leading) {
+                                        if reorderTargetID == group.id, !reorderInsertAfter {
+                                            insertionIndicator.offset(x: -5.5)
+                                        }
+                                    }
+                                    .overlay(alignment: .trailing) {
+                                        if reorderTargetID == group.id, reorderInsertAfter {
+                                            insertionIndicator.offset(x: 5.5)
+                                        }
+                                    }
                                 case .item(let item):
                                 let isLiftedSource = reorderTargetID != nil && model.draggingItemID == item.id
-                                let slot = model.versionSlots[item.id]
+                                let slot = slots[item.id]
                                 PinCard(
                                     item: item,
                                     model: model,
@@ -1565,7 +2019,24 @@ private struct StashWorkspace: View {
                                     versionSlot: slot
                                 )
                                     .id(item.id)
-                                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                                    .transition(.opacity)
+                                    // 松手就会并进这张卡：整张亮起来 + 微微放大，
+                                    // 和"插到旁边"那根竖线是两种完全不同的反馈，
+                                    // 用户在松手之前就知道会发生哪一件事。
+                                    // 只让光环和这一下放大参与动画。
+                                    //
+                                    // `.animation(_:value:)` 作用于整棵子树：
+                                    // 挂在卡片上时，合并高亮一变，卡片里所有
+                                    // 可动的属性（缩略图、文字、底栏图标）都被
+                                    // 一起卷进这条 spring，那是抖动的来源。
+                                    .overlay {
+                                        MergeHalo(active: mergeTargetID == item.id)
+                                            .animation(
+                                                .spring(response: 0.22, dampingFraction: 0.75),
+                                                value: mergeTargetID == item.id
+                                            )
+                                    }
+                                    .scaleEffect(mergeTargetID == item.id ? 1.04 : 1)
                                     // 残影修复：拖拽副本跟着指针走时，原位那张保持全亮，
                                     // 两张叠着看就是"残影"。拖进列表范围后把原位压暗。
                                     .opacity(isLiftedSource ? 0.25 : 1)
@@ -1591,22 +2062,70 @@ private struct StashWorkspace: View {
                                             model: model,
                                             reorderTargetID: $reorderTargetID,
                                             insertAfter: $reorderInsertAfter,
+                                            mergeTargetID: $mergeTargetID,
                                             perform: { draggedID, anchorID, after in
                                                 withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                                                    model.moveItem(draggedID, anchor: anchorID, after: after)
+                                                    model.moveCard(draggedID, anchor: anchorID, after: after)
                                                 }
                                             }
                                         )
                                     )
                                 }
                             }
+                            // 全都钉住了的话，分界线在队尾。
+                            if firstLoose == entries.count, !entries.isEmpty {
+                                PinBoundary(
+                                    model: model,
+                                    isTargeted: isOverPinBoundary,
+                                    leavingZone: boundaryHighlight == .unpinning,
+                                    height: isAnswering
+                                        ? max(78, cardTrackHeight - 16) : PinCard.height
+                                )
+                                .onDrop(
+                                    of: [UTType.data],
+                                    delegate: PinBoundaryDropDelegate(
+                                        model: model,
+                                        isTargeted: $isOverPinBoundary
+                                    )
+                                )
+                            }
                         }
-                        .padding(.horizontal, 12)
                         .padding(.vertical, 8)
                         .scrollTargetLayout()
                         // 内容顶部对齐贴着页签往下排；剩余空间留在底部是"生长空间"，
                         // 上下居中则会读出两道无意义的黑边。
                         .frame(maxHeight: .infinity, alignment: .top)
+                    }
+                    // 左右留白用 contentMargins 而不是给内容加 padding。
+                    //
+                    // 两者画出来一样，但 scrollTo 只认前者：用 padding 时，
+                    // "滚到第一张"会把那 12pt 一起滚出视野，第一张直接贴住左边，
+                    // 和平时的间距对不上——双击标题栏跳回开头就会看到这个。
+                    .contentMargins(.horizontal, 12, for: .scrollContent)
+                    // 切页签换的是一整批内容，不是"这几张动了动"。
+                    //
+                    // 不给它换身份的话，SwiftUI 会拿新旧两批卡片做逐张 diff：
+                    // 十几张同时淡出、另十几张同时缩放淡入，还都挂在同一条
+                    // 换位动画上——那就是切页签时看到的抖动。整条轨道换个
+                    // id，让它整体交叉淡出，一帧的活。
+                    .id(model.activeTab)
+                    .transition(.opacity)
+                    // 「拖到空白处 = 离开当前的区」这一层必须铺满整条轨道，
+                    // 而不是贴在卡片那一排的背景上——那个背景正好就是卡片本身
+                    // 的大小，右边那片真正的空白根本不在它的范围里，怎么拖都
+                    // 落不进来。
+                    .background {
+                        Color.black.opacity(0.001)
+                            .contentShape(Rectangle())
+                            .onDrop(
+                                of: [UTType.data],
+                                delegate: GroupDetachDropDelegate(
+                                    model: model,
+                                    isDetaching: $isDetachingFromGroup,
+                                    boundary: $boundaryHighlight
+                                )
+                            )
+                            .overlay { DetachHint(active: isDetachingFromGroup) }
                     }
                     .scrollTargetBehavior(.viewAligned)
                     .onChange(of: model.scrollToFirstCardRequest) {
@@ -1628,7 +2147,14 @@ private struct StashWorkspace: View {
                 }
                 .frame(height: isAnswering ? cardTrackHeight : nil)
                 .frame(maxHeight: isAnswering ? nil : .infinity)
-                .animation(.smooth(duration: 0.28), value: model.visibleItems.map(\.id))
+                // 触发值用一个 Int，不用每帧新建 UUID 数组去比。
+                // 换位靠 spring 而不是 smooth：smooth 是匀速收尾，几张卡同时
+                // 挪动时看着像一起"滑"过去；spring 有初速和阻尼，读起来才是
+                // 被推开的。
+                .animation(
+                    .spring(response: 0.34, dampingFraction: 0.86),
+                    value: model.visibleOrderRevision
+                )
                 // 手风琴：旧版本进出轨道要有推开 / 合拢的过程。直接出现和
                 // 直接消失会让人以为卡片被删了或者凭空多了几张。
                 .animation(
@@ -1809,21 +2335,42 @@ private struct StashWorkspace: View {
     @ViewBuilder
     private var platformRow: some View {
         let groups = model.availableLinkGroups
-        if groups.count > 1 {
+        let folders = model.availableCardGroups
+        if groups.count > 1 || !folders.isEmpty {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 4) {
-                    if platformRowExpanded {
-                        platformChip(nil)
-                        ForEach(groups, id: \.self) { platformChip($0) }
-                    } else {
-                        collapsedPlatformStack(groups)
+                    // 手动分组排在最前：那是用户自己起的名字，比按平台自动
+                    // 归的类更接近他此刻脑子里的分类。
+                    //
+                    // 和平台那一排同一套折叠语言：默认收成一摞图标，点开才摊成
+                    // 带名字的胶囊。分组名字都不短（"名企进校园"），一字排开时
+                    // 两三个就把整条轨道占满了。
+                    if folderRowExpanded {
+                        ForEach(folders) { folderChip($0) }
+                    } else if !folders.isEmpty {
+                        collapsedFolderStack(folders)
+                    }
+                    if !folders.isEmpty, groups.count > 1 {
+                        Divider().frame(height: 12).padding(.horizontal, 2)
+                    }
+                    if groups.count > 1 {
+                        if platformRowExpanded {
+                            platformChip(nil)
+                            ForEach(groups, id: \.self) { platformChip($0) }
+                        } else {
+                            collapsedPlatformStack(groups)
+                        }
                     }
                 }
                 .padding(.horizontal, 12)
             }
             .frame(height: 26)
             .animation(.spring(response: 0.34, dampingFraction: 0.72), value: platformRowExpanded)
-            .onChange(of: model.platformRowShouldCollapse) { platformRowExpanded = false }
+            .animation(.spring(response: 0.34, dampingFraction: 0.72), value: folderRowExpanded)
+            .onChange(of: model.platformRowShouldCollapse) {
+                platformRowExpanded = false
+                folderRowExpanded = false
+            }
         }
     }
 
@@ -1867,6 +2414,72 @@ private struct StashWorkspace: View {
         case .domain(let host):
             DomainBadge(host: host, fontSize: size * 0.5)
                 .frame(width: size, height: size)
+        }
+    }
+
+    /// 折叠态：分组图标叠成一摞，点开才摊出名字。和平台那一排同款。
+    private func collapsedFolderStack(_ folders: [CardGroup]) -> some View {
+        Button { folderRowExpanded = true } label: {
+            HStack(spacing: -7) {
+                ForEach(Array(folders.prefix(6).enumerated()), id: \.element.id) { index, _ in
+                    Image(systemName: "folder.fill")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(Style.cool)
+                        .frame(width: 18, height: 18)
+                        .background(Style.cool.opacity(0.22), in: Circle())
+                        // 加一圈底色描边，叠着时才分得出是几枚而不是一团。
+                        .overlay { Circle().strokeBorder(Style.shell, lineWidth: 2) }
+                        .zIndex(Double(folders.count - index))
+                        .transition(.scale(scale: 0.6).combined(with: .opacity))
+                }
+                if folders.count > 6 {
+                    Text("+\(folders.count - 6)")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Style.tertiary)
+                        .padding(.leading, 10)
+                }
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 22)
+            .background(Style.surface, in: Capsule())
+            .overlay { Capsule().strokeBorder(Style.stroke) }
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help("按分组筛选")
+    }
+
+    /// 顶部那排里的分组胶囊。点一下只看这一组，再点回到全部。
+    private func folderChip(_ group: CardGroup) -> some View {
+        let selected = model.activeCardGroup == group.id
+        return Button {
+            model.activeCardGroup = selected ? nil : group.id
+            // 选完就收回去，把宽度还给卡片。
+            if selected { folderRowExpanded = false }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "folder.fill").font(.system(size: 9, weight: .semibold))
+                Text(group.name)
+                    .font(.system(size: 10, weight: .medium))
+                    .lineLimit(1)
+                Text("\(group.itemIDs.count)")
+                    .font(.system(size: 9, weight: .semibold))
+                    .monospacedDigit()
+                    .opacity(0.7)
+            }
+            .foregroundStyle(selected ? Style.primary : Style.cool)
+            .padding(.horizontal, 8)
+            .frame(height: 22)
+            .background(
+                selected ? Style.cool.opacity(0.28) : Style.cool.opacity(0.12), in: Capsule()
+            )
+            .overlay { Capsule().strokeBorder(Style.cool.opacity(selected ? 0.7 : 0.3)) }
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help(selected ? "回到全部" : "只看「\(group.name)」")
+        .contextMenu {
+            Button("解散分组", role: .destructive) { model.dissolveCardGroup(group.id) }
         }
     }
 
@@ -2280,6 +2893,9 @@ private struct PinCard: View {
                 }
             }
             Button("重命名与标签…") { editingAnnotation = true }
+            if model.cardGroup(of: item.id) != nil {
+                Button("移出分组") { model.detachFromGroup(item.id) }
+            }
             Button(model.isTodo(item.id) ? "移出待办" : "标为待办") {
                 Task { await model.setTodo(item.id, enabled: !model.isTodo(item.id)) }
             }
@@ -2408,8 +3024,11 @@ private struct PinCard: View {
     /// 两个分支逐字一致，否则会出现"让了位但没人来"或"没让位却撞上"。
     private var hasCornerBadge: Bool {
         if let presentation, presentation.isMeaningful { return true }
-        if let platform = model.linkPlatform(of: item) { return platform.iconResourceName != nil }
-        return false
+        if let platform = model.linkPlatform(of: item), platform.iconResourceName != nil {
+            return true
+        }
+        // 链接兜底那枚浏览器图标也占着右下角，来源应用角标同样要让位。
+        return model.browserForLink(item) != nil
     }
 
     private var mediaContent: some View {
@@ -2440,6 +3059,27 @@ private struct PinCard: View {
                     .buttonStyle(.plain)
                     .offset(x: 4, y: 4)
                     .help(model.openLinkHint(item))
+                } else if let bundleID = model.browserForLink(item),
+                          let icon = LinkOpener.browserIcon(bundleID) {
+                    // 认不出平台的链接（论文站、公司官网…）用浏览器图标顶上。
+                    //
+                    // 只画这一枚：平台图标已经在的时候再挂一枚浏览器，说的是
+                    // 同一件事（"点这里打开"），而两枚小圆点挤在一张 74pt 的
+                    // 缩略图上，先被牺牲的是缩略图本身。
+                    Button { model.openInBrowser(item) } label: {
+                        Image(nsImage: icon)
+                            .resizable()
+                            .interpolation(.high)
+                            .frame(width: 20, height: 20)
+                            .clipShape(Circle())
+                            .overlay {
+                                Circle().strokeBorder(Color.black.opacity(0.55), lineWidth: 1.5)
+                            }
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .offset(x: 4, y: 4)
+                    .help(model.openInBrowserHint(item))
                 }
             }
             VStack(alignment: .leading, spacing: 2) {
@@ -2747,6 +3387,292 @@ private struct CodeBadge: View {
         )
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(signature.accessibilityLabel) \(signature.code)")
+    }
+}
+
+/// 用户手动归的一组卡片，像文件夹一样叠着。
+///
+/// 和版本合集共用同一套折叠 / 展开的动效语言（一摞纸、点开摊出来），但用
+/// **另一个颜色**：版本合集是程序认出来的关系，手动分组是用户自己的分类，
+/// 两摞叠在同一条轨道上时必须一眼分得出谁是谁。
+private struct CardGroupAccordion: View {
+    let group: CardGroup
+    let members: [Item]
+    @Bindable var model: AppModel
+    var availableHeight: CGFloat = PinCard.height
+
+    @State private var hovering = false
+    @State private var renaming = false
+    @State private var draftName = ""
+    @State private var thumbnails: [UUID: NSImage?] = [:]
+
+    private var tint: Color { Style.cool }
+    private var isExpanded: Bool { model.expandedCardGroups.contains(group.id) }
+    /// 纸边错开多少。悬停时错得更开一点，像被手指拨了一下。
+    private var tile: (x: CGFloat, y: CGFloat) { hovering ? (9, 7) : Self.restTile }
+    /// **布局**用的那一份，永远是静止值。
+    ///
+    /// 让 frontHeight 跟着 hover 走会连锁：卡面高度变 → 缩略图边长变 →
+    /// 文字重排。鼠标一进来整张卡的字就跳一下，那不是"响应"，是抖动。
+    /// 动效只让后面几张纸动，前面这张的尺寸从头到尾不变。
+    private static let restTile: (x: CGFloat, y: CGFloat) = (7, 5)
+    private var sheetDepths: [Int] { Array(1...min(2, max(1, members.count - 1))) }
+    private var shape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: Style.cardRadius, style: .continuous)
+    }
+
+    var body: some View {
+        Group {
+            if isExpanded { expanded } else { collapsed }
+        }
+        .onHover { hovering = $0 }
+        .animation(.spring(response: 0.34, dampingFraction: 0.72), value: isExpanded)
+        .animation(.spring(response: 0.28, dampingFraction: 0.8), value: hovering)
+        .contextMenu {
+            Button("重命名分组…") { beginRenaming() }
+            Button(isExpanded ? "折叠" : "展开") { model.toggleCardGroup(group.id) }
+            Divider()
+            Button("解散分组", role: .destructive) { model.dissolveCardGroup(group.id) }
+        }
+        .popover(isPresented: $renaming, arrowEdge: .bottom) {
+            GroupNameEditor(name: $draftName) { value in
+                renaming = false
+                model.renameCardGroup(group.id, to: value)
+            }
+        }
+        // 刚拖出来的新组立刻问名字：这一刻用户脑子里正想着"这几张是一类"，
+        // 过后再补名字要重新回忆一遍。
+        .onChange(of: model.groupAwaitingName) { _, awaiting in
+            guard awaiting == group.id else { return }
+            model.groupAwaitingName = nil
+            beginRenaming()
+        }
+    }
+
+    private func beginRenaming() {
+        draftName = group.name
+        renaming = true
+    }
+
+    private var collapsed: some View {
+        ZStack(alignment: .topLeading) {
+            ForEach(sheetDepths.reversed(), id: \.self) { depth in
+                shape
+                    .fill(Style.ink)
+                    .overlay { shape.fill(tint.opacity(0.2 - Double(depth) * 0.05)) }
+                    .overlay {
+                        shape.strokeBorder(
+                            tint.opacity(0.55 - Double(depth) * 0.14), lineWidth: 1
+                        )
+                    }
+                    .frame(width: PinCard.width, height: frontHeight)
+                    .offset(x: CGFloat(depth) * tile.x, y: CGFloat(depth) * tile.y)
+                    .shadow(color: Color.black.opacity(0.25), radius: 4, x: 1, y: 1)
+            }
+            folderFace
+                .frame(width: PinCard.width, height: frontHeight, alignment: .topLeading)
+                .background { shape.fill(Style.ink) }
+                .overlay { shape.fill(tint.opacity(0.06)) }
+                .overlay {
+                    shape.strokeBorder(tint.opacity(hovering ? 0.6 : 0.38), lineWidth: 1)
+                }
+                .clipShape(shape)
+                .shadow(color: Color.black.opacity(0.32), radius: 6, x: 2, y: 2)
+        }
+        .frame(
+            width: PinCard.width + CGFloat(sheetDepths.count) * Self.restTile.x,
+            height: availableHeight,
+            alignment: .topLeading
+        )
+        .contentShape(shape)
+        .onTapGesture { model.toggleCardGroup(group.id) }
+        .help("\(group.name) · \(members.count) 张，点开查看")
+        .transition(.opacity)
+    }
+
+    /// 折叠态画的是**文件夹自己**，不是里面第一张卡。
+    ///
+    /// 之前直接摆第一张卡的完整卡面，读出来是"一张叫 xxx 的卡片顺便贴了个
+    /// 文件夹标签"——组名被挤在标题旁边，而卡片正文占满了整张脸。文件夹要被
+    /// 一眼认出来靠的是名字和"里面有什么"，所以：缩略图换成成员的九宫格
+    /// （像手机上的应用文件夹），标题位置让给组名，副标题列成员的名字。
+    private var folderFace: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .top, spacing: 9) {
+                memberGrid
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "folder.fill")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(tint)
+                        Text(group.name)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(Style.primary)
+                            .lineLimit(1)
+                    }
+                    Text(memberSummary)
+                        .font(.system(size: 10))
+                        .foregroundStyle(Style.tertiary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                }
+                Spacer(minLength: 0)
+            }
+            Spacer(minLength: 0)
+            HStack(spacing: 5) {
+                Text("\(members.count) 张")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(tint)
+                    .padding(.horizontal, 6)
+                    .frame(height: 16)
+                    .background(tint.opacity(0.16), in: Capsule())
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(hovering ? tint : Style.tertiary)
+            }
+        }
+        .padding(8)
+    }
+
+    /// 最前面那张的高度：整摞外框减去后面几层往下错开的那一段。
+    private var frontHeight: CGFloat {
+        availableHeight - CGFloat(sheetDepths.count) * Self.restTile.y
+    }
+
+    /// 成员缩略图拼成的小格子。数量决定几宫格，最多四张。
+    private var memberGrid: some View {
+        let side = min(74, max(40, frontHeight - 54))
+        let cell = (side - 3) / 2
+        return LazyVGrid(
+            columns: [GridItem(.fixed(cell), spacing: 3), GridItem(.fixed(cell), spacing: 3)],
+            spacing: 3
+        ) {
+            ForEach(Array(members.prefix(4).enumerated()), id: \.element.id) { index, item in
+                PinThumbnail(item: item, image: thumbnails[item.id] ?? nil, side: cell)
+            }
+        }
+        .frame(width: side, height: side, alignment: .topLeading)
+        .task(id: members.map(\.id)) { await loadThumbnails() }
+    }
+
+    private var memberSummary: String {
+        members.prefix(4).map(\.title).joined(separator: "、")
+    }
+
+    private func loadThumbnails() async {
+        for item in members.prefix(4) where thumbnails[item.id] == nil {
+            let url = try? await model.library.resolvedFileURL(for: item)
+            let image = item.kind == .link
+                ? LinkCoverStore.cachedImage(for: item.id)
+                : await ThumbnailStore.shared.image(item: item, url: url, logicalSize: 44)
+            thumbnails[item.id] = image
+        }
+    }
+
+    private var expanded: some View {
+        HStack(spacing: 8) {
+            spine
+            ForEach(members) { item in
+                PinCard(item: item, model: model, availableHeight: availableHeight - 12)
+                    .transition(
+                        .scale(scale: 0.9, anchor: .leading)
+                            .combined(with: .opacity)
+                    )
+            }
+        }
+        .padding(6)
+        .background {
+            RoundedRectangle(cornerRadius: Style.cardRadius + 4, style: .continuous)
+                .fill(tint.opacity(0.14))
+                .overlay {
+                    RoundedRectangle(cornerRadius: Style.cardRadius + 4, style: .continuous)
+                        .strokeBorder(tint.opacity(0.35))
+                }
+        }
+        .transition(.opacity)
+    }
+
+    /// 脊上放得下几个字：按可用高度算。硬写一个字数会在回答态（卡片变矮）
+    /// 时溢出到脊外面。
+    private var spineName: String {
+        let budget = max(2, Int((availableHeight - 76) / 11))
+        guard group.name.count > budget else { return group.name }
+        return String(group.name.prefix(max(1, budget - 1))) + "…"
+    }
+
+    /// 左侧竖脊：分组的身份和收起入口都在这里，不占卡片本身的地方。
+    private var spine: some View {
+        Button { model.toggleCardGroup(group.id) } label: {
+            VStack(spacing: 0) {
+                Image(systemName: "folder.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                    .padding(.bottom, 5)
+                // 名字竖排在脊上，像书脊。展开之后这是唯一还写着"打开的是哪
+                // 一组"的地方——只有一个文件夹图标和数字的话，用户看不出来。
+                //
+                // 逐字竖排而不是把整行旋转 90°：中文本来就能竖排，转过来的
+                // 横排字要歪着头读。
+                VStack(spacing: 1) {
+                    ForEach(Array(spineName.enumerated()), id: \.offset) { _, character in
+                        Text(String(character)).font(.system(size: 10, weight: .semibold))
+                    }
+                }
+                .fixedSize()
+                Spacer(minLength: 0)
+                Text("\(members.count)")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.bottom, 4)
+                Image(systemName: "chevron.left").font(.system(size: 9, weight: .bold))
+            }
+            .foregroundStyle(tint)
+            .frame(width: 28)
+            .frame(maxHeight: .infinity)
+            .padding(.vertical, 8)
+            .background(
+                tint.opacity(hovering ? 0.18 : 0.1),
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("折叠「\(group.name)」")
+    }
+}
+
+/// 给分组起名字。就一个输入框——名字是用户自己的话，不该有别的选项来分散它。
+private struct GroupNameEditor: View {
+    @Binding var name: String
+    let commit: (String) -> Void
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("分组名字")
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(Style.secondary)
+            TextField("比如「招聘信息」", text: $name)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13, weight: .medium))
+                .focused($focused)
+                .onSubmit { commit(name) }
+                .padding(.horizontal, 10)
+                .frame(height: 30)
+                .background(Style.surface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(Style.accent.opacity(focused ? 0.6 : 0))
+                }
+            HStack {
+                Spacer(minLength: 0)
+                Button("完成") { commit(name) }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(14)
+        .frame(width: 240)
+        .onAppear { focused = true }
     }
 }
 
@@ -3308,13 +4234,18 @@ private struct PinThumbnail: View {
         }
     }
 
+    /// 缩略图里的域名色块和平台图标。
+    ///
+    /// 只对**链接**条目解析：`linkURL` 对任何内联文字都会试着抽链接，而这个
+    /// 视图对每一条都会问。文字卡根本不需要域名色块，先按 kind 挡掉。
     private var linkHost: String? {
         guard item.kind == .link else { return nil }
         return item.linkURL?.host()
     }
 
     private var platform: LinkPlatform? {
-        item.linkURL.flatMap(LinkPlatform.resolve)
+        guard item.kind == .link else { return nil }
+        return item.linkURL.flatMap(LinkPlatform.resolve)
     }
 
     private var glyph: String {

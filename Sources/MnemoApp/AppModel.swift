@@ -124,6 +124,9 @@ final class AppModel {
     private static let aiQueueKey = "Pinland.pendingAIIDs"
     private static let sceneCacheKey = "Pinland.sceneRecommendationCache.v1"
     private static let edgeStatusEffectsKey = "Pinland.edgeStatusEffectsEnabled"
+    private static let preferredBrowserKey = "Pinland.preferredBrowser"
+    private static let autoGroupingKey = "Pinland.autoGrouping"
+    static let launchAtLoginKey = "Pinland.launchAtLogin"
     private static let expandTriggerKey = "Pinland.notchExpandTrigger"
     private static let processesTemporaryClipboardKey = "Pinland.processesTemporaryClipboard"
     private static let processableTemporaryIDsKey = "Pinland.processableTemporaryClipboardIDs"
@@ -136,7 +139,9 @@ final class AppModel {
     private static let aiSettledFingerprintKey = "Pinland.aiSettledRoutingFingerprint"
     private static let todoScanQueueKey = "Pinland.pendingTodoScanIDs.v1"
 
-    private(set) var items: [Item] = []
+    private(set) var items: [Item] = [] {
+        didSet { visibleItemsRevision &+= 1 }
+    }
     private(set) var trashedItems: [Item] = []
     private(set) var todos: [Todo] = []
     private(set) var todoItems: [Todo] = []
@@ -290,7 +295,9 @@ final class AppModel {
     var isPDFQuestioning = false
     private(set) var isAnsweringPDF = false
     private(set) var pdfAnswer: String?
-    private(set) var semanticHits: [SemanticSearchHit] = []
+    private(set) var semanticHits: [SemanticSearchHit] = [] {
+        didSet { visibleItemsRevision &+= 1 }
+    }
     private(set) var retrievalRecommendations: [RetrievalRecommendation] = []
     private(set) var semanticQuery = ""
     private(set) var understoodSearchQuery: StructuredQuery?
@@ -433,6 +440,54 @@ final class AppModel {
             // 只影响从这一刻以后新捕获的条目。已有队列、已有索引与旧临时项
             // 全部保持原状，不全量补跑，也不撤销正在进行的任务。
         }
+    }
+
+    /// 用户在设置里钉死的浏览器。
+    ///
+    /// nil = 跟随来源：这条链接从哪个浏览器拖进来的，就回哪个去（登录态、
+    /// 扩展、书签都在那边，换一个浏览器等于换了个环境）。选定某一个之后它
+    /// 一律优先——用户明确挑过的，不该再被"来源记忆"推翻。
+    /// 新内容要不要自动归进已有分组。
+    ///
+    /// 只在**已经有分组**的时候才有意义：模型只能在用户建好的组里选，
+    /// 建组永远是用户的动作。触发时机和检索索引同一条路——不是主动拖进来的
+    /// 临时内容不会每次都去问模型。
+    /// 开机自启。真值以系统为准——用户可能在「系统设置 → 登录项」里关掉，
+    /// 我们自己存的那份就成了谎话。
+    var launchesAtLogin: Bool {
+        didSet {
+            guard launchesAtLogin != oldValue else { return }
+            UserDefaults.standard.set(launchesAtLogin, forKey: Self.launchAtLoginKey)
+            if !LaunchAtLogin.set(launchesAtLogin) {
+                lastError = "开机自启设置失败，可到「系统设置 → 通用 → 登录项」手动开启"
+                launchesAtLogin = LaunchAtLogin.isEnabled
+            }
+        }
+    }
+
+    var autoGroupingEnabled: Bool {
+        didSet {
+            guard autoGroupingEnabled != oldValue else { return }
+            UserDefaults.standard.set(autoGroupingEnabled, forKey: Self.autoGroupingKey)
+        }
+    }
+
+    var preferredBrowserBundleID: String? {
+        didSet {
+            guard preferredBrowserBundleID != oldValue else { return }
+            let defaults = UserDefaults.standard
+            if let preferredBrowserBundleID {
+                defaults.set(preferredBrowserBundleID, forKey: Self.preferredBrowserKey)
+            } else {
+                defaults.removeObject(forKey: Self.preferredBrowserKey)
+            }
+            invalidateLinkBrowserCache()
+        }
+    }
+
+    /// 这条链接实际会用哪个浏览器。设置优先，其次来源记忆，最后交给系统。
+    func browserBundleID(for itemID: UUID) -> String? {
+        preferredBrowserBundleID ?? LinkSourceBrowserStore.bundleID(for: itemID)
     }
 
     var edgeStatusEffectsEnabled: Bool {
@@ -612,6 +667,7 @@ final class AppModel {
         defaults.set(mode.rawValue, forKey: Self.modeKey)
         defaults.set(focusDurationMinutes, forKey: Self.focusDurationKey)
         defaults.set(edgeStatusEffectsEnabled, forKey: Self.edgeStatusEffectsKey)
+        defaults.set(autoGroupingEnabled, forKey: Self.autoGroupingKey)
         defaults.set(expandTrigger.rawValue, forKey: Self.expandTriggerKey)
         defaults.set(processesTemporaryClipboard, forKey: Self.processesTemporaryClipboardKey)
         defaults.set(todoIntakeEnabled, forKey: Self.todoIntakeKey)
@@ -637,6 +693,10 @@ final class AppModel {
     @ObservationIgnored private let entitlementGate: any EntitlementChecking
     @ObservationIgnored var openSettingsAction: (() -> Void)?
     @ObservationIgnored var aiEnrichmentAction: ((Item) async -> ItemAIEnrichment?)?
+    /// 给一组卡片起名字。见 `ProviderSettingsModel.nameGroup`。
+    @ObservationIgnored var groupNamingAction: (([String]) async -> String?)?
+    /// 这条新内容归进已有的哪个分组。返回下标，nil = 哪个都不归。
+    @ObservationIgnored var groupAssignmentAction: ((String, [String]) async -> Int?)?
     @ObservationIgnored var sceneRecommendationRouteFingerprintAction: (() -> String?)?
     @ObservationIgnored var contextRouteFingerprintAction: (() -> String?)?
     @ObservationIgnored var aiTransformAction: ((Item, SceneActionID) async -> String?)?
@@ -687,6 +747,10 @@ final class AppModel {
             : 25
 
         edgeStatusEffectsEnabled = defaults.object(forKey: Self.edgeStatusEffectsKey) as? Bool ?? true
+        preferredBrowserBundleID = defaults.string(forKey: Self.preferredBrowserKey)
+        autoGroupingEnabled = defaults.object(forKey: Self.autoGroupingKey) as? Bool ?? true
+        LaunchAtLogin.applyDefaultIfNeeded(defaultsKey: Self.launchAtLoginKey)
+        launchesAtLogin = LaunchAtLogin.isEnabled
         expandTrigger = (defaults.string(forKey: Self.expandTriggerKey))
             .flatMap(NotchExpandTrigger.init(rawValue:)) ?? .click
         processesTemporaryClipboard = defaults.object(
@@ -864,20 +928,73 @@ final class AppModel {
     }
 
     /// 悬停提示：这一下会落到哪个 App / 浏览器。
+    /// 只在浏览器里打开，不管有没有装对应的 App。卡片左下角那枚浏览器徽标走这条。
+    func openInBrowser(_ item: Item) {
+        guard let url = item.linkURL else { return }
+        LinkOpener.openInBrowser(url, bundleID: browserBundleID(for: item.id))
+    }
+
+    func browserForLink(_ item: Item) -> String? {
+        if let cached = linkBrowserCache[item.id] { return cached }
+        let resolved: String? = linkURL(of: item) == nil
+            ? nil
+            : (browserBundleID(for: item.id) ?? LinkOpener.systemDefaultBrowserBundleID)
+        linkBrowserCache[item.id] = resolved
+        return resolved
+    }
+
+    /// 设置里换了默认浏览器之后，上面那份缓存就过期了。
+    private func invalidateLinkBrowserCache() { linkBrowserCache.removeAll() }
+
+    func openInBrowserHint(_ item: Item) -> String {
+        guard let bundleID = browserForLink(item),
+              let name = LinkOpener.browserName(bundleID) else { return "在浏览器里打开" }
+        return "用 \(name) 打开"
+    }
+
     func openLinkHint(_ item: Item) -> String {
         guard let url = item.linkURL else { return "打开" }
         let destination = LinkOpener.destinationName(
             for: url,
-            preferredBrowserBundleID: LinkSourceBrowserStore.bundleID(for: item.id)
+            preferredBrowserBundleID: browserBundleID(for: item.id)
         )
         return "用 \(destination) 打开"
     }
 
     /// 这条 Pin 属于哪个已知平台。只有它决定徽标和跳转，域名分组不参与。
-    func linkPlatform(of item: Item) -> LinkPlatform? {
-        guard let url = item.linkURL else { return nil }
-        return LinkPlatform.resolve(url)
+    /// 这条内容指向的链接，带缓存。
+    ///
+    /// `Item.linkURL` 便宜的路径是一次字符串解析，贵的路径要跑 NSDataDetector。
+    /// 而卡片排版对**每一条**都会问，滚动时每帧都问一遍——必须记住答案。
+    /// 内容变了 id 也会变（重新入库），按 id 缓存是安全的。
+    @ObservationIgnored private var linkURLCache: [UUID: URL?] = [:]
+
+    func linkURL(of item: Item) -> URL? {
+        if let cached = linkURLCache[item.id] { return cached }
+        let resolved = item.linkURL
+        linkURLCache[item.id] = resolved
+        return resolved
     }
+
+    /// 这条链接属于哪个平台。
+    ///
+    /// 结果缓存住：`item.linkURL` 每次都要重新解析一遍分享文案（正则 +
+    /// NSDataDetector），而卡片排版每帧都会问。同一条内容的链接不会变，
+    /// 内容变了 id 也会变（重新入库），所以按 id 缓存是安全的。
+    @ObservationIgnored private var linkPlatformCache: [UUID: LinkPlatform?] = [:]
+
+    func linkPlatform(of item: Item) -> LinkPlatform? {
+        if let cached = linkPlatformCache[item.id] { return cached }
+        let resolved = linkURL(of: item).flatMap(LinkPlatform.resolve)
+        linkPlatformCache[item.id] = resolved
+        return resolved
+    }
+
+    /// 这条链接会用哪个浏览器打开——卡片上那枚徽标的图标和提示都问它。
+    ///
+    /// 同样缓存：它要串起"设置 → 来源记忆 → 系统默认"三层，而排版每帧问两次
+    /// （一次判角标占位，一次画图标）。
+    @ObservationIgnored private var linkBrowserCache: [UUID: String?] = [:]
 
     // MARK: - 同一份文档的多个版本
 
@@ -961,6 +1078,275 @@ final class AppModel {
         return key
     }
 
+    // MARK: - 钉住区
+
+    /// 钉住区变化的可观察计数。`PinnedLaneStore` 是静态存储，不参与
+    /// Observation，需要一个可观察的量把它的变化带进视图。
+    private(set) var pinnedLaneGeneration = 0
+
+    var pinnedLaneIDs: [UUID] {
+        _ = pinnedLaneGeneration
+        return PinnedLaneStore.ids()
+    }
+
+    func isPinnedToFront(_ id: UUID) -> Bool {
+        _ = pinnedLaneGeneration
+        return PinnedLaneStore.contains(id)
+    }
+
+    /// 钉到最前面。`before` 为 nil 时排在钉住区末尾。
+    ///
+    /// 钉住的同时把它从分组里拿出来：分组是"这几张是一类"，钉住是"这一张我
+    /// 现在一直要看"，一张卡不能同时被两套版式管——那样它到底画在哪儿没有答案。
+    func pinToFront(_ id: UUID, before target: UUID? = nil) {
+        if cardGroup(of: id) != nil {
+            CardGroupStore.detach(id)
+            cardGroupGeneration &+= 1
+        }
+        PinnedLaneStore.pin(id, before: target)
+        pinnedLaneGeneration &+= 1
+        showTransientFeedback("已钉到最前")
+    }
+
+    func unpinFromFront(_ id: UUID) {
+        guard PinnedLaneStore.contains(id) else { return }
+        PinnedLaneStore.unpin(id)
+        pinnedLaneGeneration &+= 1
+        showTransientFeedback("已取消钉住")
+    }
+
+    /// 整组换位：把成员按原顺序连续地挪到落点。
+    ///
+    /// 组在轨道上的位置是由"第一个被扫到的成员"决定的，所以只挪一张卡不够——
+    /// 其余成员还留在原处，下一帧组又跳回去了。把整组搬成连续的一段，位置
+    /// 才真的跟着走。成员数是个位数，逐张写代价可以忽略。
+    func moveGroup(_ groupID: UUID, anchor target: UUID, after: Bool) {
+        guard let group = cardGroups.first(where: { $0.id == groupID }),
+              !group.itemIDs.contains(target) else { return }
+        var anchorID = target
+        var insertAfter = after
+        for id in group.itemIDs where items.contains(where: { $0.id == id }) {
+            moveItem(id, anchor: anchorID, after: insertAfter)
+            // 后面的成员依次跟在前一张后面，整组才是连续的一段。
+            anchorID = id
+            insertAfter = true
+        }
+    }
+
+    /// 卡片换位的唯一入口：它同时决定这次拖动有没有跨区。
+    ///
+    /// 把三件事收在一处，是因为它们本来就是同一个动作的三种结果，而用户做的
+    /// 只有一个动作——把卡片放到某两张之间。分散在各处判断的话，必然出现
+    /// "拖出来了但还留在组里"这种自相矛盾的状态。
+    func moveCard(_ dragged: UUID, anchor target: UUID, after: Bool) {
+        let draggedPinned = isPinnedToFront(dragged)
+        let targetPinned = isPinnedToFront(target)
+
+        // 落到钉住区里 = 进钉住区（或在区内换位）。
+        if targetPinned {
+            if draggedPinned {
+                movePinned(dragged, anchor: target, after: after)
+            } else {
+                pinToFront(dragged, before: after ? nil : target)
+            }
+            return
+        }
+        // 落到普通区 = 离开钉住区。
+        if draggedPinned { unpinFromFront(dragged) }
+        // 插到分组以外的位置，就是把它从组里拿出来了——用户看到的是它落在
+        // 别处，那它就该真的在别处。留在组里的话下一帧它会跳回组里，
+        // 看着像"拖了个寂寞"。
+        if let group = cardGroup(of: dragged), !group.itemIDs.contains(target) {
+            detachFromGroup(dragged)
+        }
+        moveItem(dragged, anchor: target, after: after)
+    }
+
+    /// 钉住区内部换位。
+    func movePinned(_ id: UUID, anchor target: UUID, after: Bool) {
+        PinnedLaneStore.move(id, before: target, after: after)
+        pinnedLaneGeneration &+= 1
+    }
+
+    // MARK: - 手动分组
+
+    /// 分组数据的版本号。改一次界面重算一次——`CardGroupStore` 是静态存储，
+    /// 不参与 Observation，需要一个可观察的量把它的变化带进视图。
+    private(set) var cardGroupGeneration = 0
+    /// 展开的分组。和版本合集分开存：两者语义不同，混在一起会互相干扰。
+    var expandedCardGroups: Set<UUID> = []
+    /// 顶部那一排选中的分组。选中后只看这一组的卡片。
+    var activeCardGroup: UUID? {
+        didSet {
+            guard activeCardGroup != oldValue else { return }
+            // 选了分组就别再叠一层平台筛选，两个一起收窄多半什么都剩不下。
+            if activeCardGroup != nil { activeLinkGroup = nil }
+        }
+    }
+    /// 刚建好、等着起名字的那一组。界面据此弹出命名框。
+    var groupAwaitingName: UUID?
+
+    var cardGroups: [CardGroup] {
+        _ = cardGroupGeneration
+        return CardGroupStore.all()
+    }
+
+    /// 顶部一排里能点的分组：成员至少有一张还看得见。
+    var availableCardGroups: [CardGroup] {
+        let visible = Set(visibleItemsIgnoringGroupFilter.map(\.id))
+        return cardGroups.filter { group in group.itemIDs.contains { visible.contains($0) } }
+    }
+
+    /// 条目 → 它所在的组。
+    ///
+    /// 建成索引而不是每次线性找：`cardGroup(of:)` 在排版时对**每一条**都要问
+    /// 一次，而 `CardGroupStore.group(containing:)` 内部是一次全表扫描——
+    /// 合起来就是 O(条目数 × 分组数)，每帧都跑。索引按分组代次缓存，
+    /// 分组没变就不重建。
+    @ObservationIgnored private var cardGroupIndexCache: (generation: Int, value: [UUID: CardGroup])?
+
+    var cardGroupIndex: [UUID: CardGroup] {
+        if let cache = cardGroupIndexCache, cache.generation == cardGroupGeneration {
+            return cache.value
+        }
+        var index: [UUID: CardGroup] = [:]
+        for group in CardGroupStore.all() {
+            for id in group.itemIDs { index[id] = group }
+        }
+        cardGroupIndexCache = (cardGroupGeneration, index)
+        return index
+    }
+
+    func cardGroup(of itemID: UUID) -> CardGroup? {
+        cardGroupIndex[itemID]
+    }
+
+    /// 把一张卡拖到另一张上：合成一组，或者加入对方已有的组。
+    ///
+    /// 组不能和组合并——两组各自是用户归好的一个概念，合起来之后没有任何
+    /// 办法还原成原来的两堆。要合并只能一张一张拖过去，那时候用户是清楚的。
+    func mergeCards(_ dragged: UUID, into target: UUID) {
+        guard draggingGroupID == nil, cardGroup(of: dragged)?.id != cardGroup(of: target)?.id
+                || cardGroup(of: dragged) == nil else { return }
+        let existing = CardGroupStore.group(containing: target)
+        let created = CardGroupStore.merge(dragged, into: target, defaultName: defaultGroupName())
+        cardGroupGeneration &+= 1
+        guard let created else { return }
+        // 不自动展开：合并之后用户多半还要接着拖第三张、第四张，展开的组占
+        // 整条轨道，反而把要拖的那些挤出了视野。想看里面点一下就是。
+        showTransientFeedback(existing == nil ? "已建分组" : "已加入分组")
+        // 新建的组交给模型起名字：用户把两张卡叠在一起的那一刻，心里已经有
+        // 一个词了（"招聘信息""房子"），只是懒得打。模型看一眼内容说出来，
+        // 猜错了改一下就是，总好过一律叫"新分组 1"。
+        //
+        // 不弹输入框打断他：名字先自己长出来，右键随时能改。
+        guard existing == nil else { return }
+        nameGroupAutomatically(created)
+    }
+
+    private func nameGroupAutomatically(_ groupID: UUID) {
+        guard let action = groupNamingAction,
+              let group = cardGroups.first(where: { $0.id == groupID }) else { return }
+        let summaries = group.itemIDs.compactMap { id in
+            items.first(where: { $0.id == id }).map(groupingSummary(of:))
+        }
+        guard !summaries.isEmpty else { return }
+        Task { [weak self] in
+            guard let name = await action(summaries), let self else { return }
+            // 期间用户可能已经自己改过名字了，那就以他的为准。
+            guard self.cardGroups.first(where: { $0.id == groupID })?.name
+                    == group.name else { return }
+            self.renameCardGroup(groupID, to: name)
+        }
+    }
+
+    /// 交给模型看的那一段"这张卡是什么"。
+    ///
+    /// 标题 + 标签 + 正文摘录，够它判断归属了；不塞全文——分组判断只需要
+    /// 认出主题，而全文会让每一次归类都变成一次昂贵调用。
+    private func groupingSummary(of item: Item) -> String {
+        var parts = [item.title]
+        if let group = item.group { parts.append(group) }
+        if !item.tags.isEmpty { parts.append(item.tags.joined(separator: "、")) }
+        if case .inline(let text) = item.holding {
+            parts.append(String(text.prefix(200)))
+        } else if let filename = item.originalFilename {
+            parts.append(filename)
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    /// 一条新内容建好索引之后，看它属不属于已有的某个分组。
+    ///
+    /// 触发时机和检索索引完全同一条路：只有拖入、显式收纳、手机同步过来的
+    /// 内容会走到这里，随手复制的临时内容不会——那些多数是过路的，
+    /// 为它们每条都问一次模型既费钱又吵。
+    func considerAutoGrouping(_ itemID: UUID) async {
+        guard autoGroupingEnabled,
+              isFeatureUnlocked(.ai),
+              let action = groupAssignmentAction,
+              cardGroup(of: itemID) == nil,
+              let item = items.first(where: { $0.id == itemID }),
+              shouldProcessContent(item) else { return }
+        let groups = cardGroups
+        guard !groups.isEmpty else { return }
+        guard let index = await action(groupingSummary(of: item), groups.map(\.name)),
+              groups.indices.contains(index) else { return }
+        // 等模型回来的这段时间里，用户可能已经自己把它归好、或者把那个组
+        // 解散了。落地前重新确认一遍。
+        guard cardGroup(of: itemID) == nil,
+              let target = cardGroups.first(where: { $0.id == groups[index].id }),
+              let anchor = target.itemIDs.first else { return }
+        CardGroupStore.merge(itemID, into: anchor, defaultName: target.name)
+        cardGroupGeneration &+= 1
+        showTransientFeedback("已归入「\(target.name)」")
+    }
+
+    private func defaultGroupName() -> String {
+        let taken = Set(cardGroups.map(\.name))
+        var index = 1
+        while taken.contains("新分组 \(index)") { index += 1 }
+        return "新分组 \(index)"
+    }
+
+    func detachFromGroup(_ itemID: UUID) {
+        guard CardGroupStore.group(containing: itemID) != nil else { return }
+        CardGroupStore.detach(itemID)
+        cardGroupGeneration &+= 1
+        clearStaleCardGroupSelection()
+        showTransientFeedback("已移出分组")
+    }
+
+    func renameCardGroup(_ groupID: UUID, to name: String) {
+        CardGroupStore.rename(groupID, to: name)
+        cardGroupGeneration &+= 1
+    }
+
+    func dissolveCardGroup(_ groupID: UUID) {
+        CardGroupStore.dissolve(groupID)
+        expandedCardGroups.remove(groupID)
+        cardGroupGeneration &+= 1
+        clearStaleCardGroupSelection()
+        showTransientFeedback("已解散分组")
+    }
+
+    func toggleCardGroup(_ groupID: UUID) {
+        if expandedCardGroups.contains(groupID) {
+            expandedCardGroups.remove(groupID)
+        } else {
+            expandedCardGroups.insert(groupID)
+        }
+    }
+
+    /// 选中的分组消失了（解散、成员全删）就把筛选收回去，否则界面停在
+    /// 一片空白上，而那个筛选条已经不存在了。
+    private func clearStaleCardGroupSelection() {
+        guard let activeCardGroup else { return }
+        if !availableCardGroups.contains(where: { $0.id == activeCardGroup }) {
+            self.activeCardGroup = nil
+        }
+    }
+
     /// 卡片轨道上排的一格。
     ///
     /// 折叠起来的一族**不是"最新那版加个角标"，而是一张合集卡**：它代表的是
@@ -975,11 +1361,15 @@ final class AppModel {
         /// "底下还有几张"。整族占一格则保证展开后它们仍然是一伙的，不会和
         /// 旁边不相干的卡片混成一片。
         case family(VersionCollection, [Item])
+        /// 用户手动归的一组。和版本合集共用同一套折叠动效，但它有名字、
+        /// 能改名、能解散——那是用户自己的分类，不是程序猜出来的。
+        case cardGroup(CardGroup, [Item])
         case item(Item)
 
         var id: UUID {
             switch self {
             case .family(let collection, _): collection.id
+            case .cardGroup(let group, _): group.id
             case .item(let item): item.id
             }
         }
@@ -1000,19 +1390,35 @@ final class AppModel {
     /// 折叠不改变 `visibleItems`——搜索、拖拽排序、隐私过滤全都还在整份列表上
     /// 工作，这里只决定"这一刻怎么画"。
     var displayEntries: [DisplayEntry] {
+        // visibleItems 自己就要过滤 + 排序一遍，取一次存下来。下面每处都用它，
+        // 不再反复重算。
+        let visible = visibleItems
         let slots = versionSlots
-        guard !slots.isEmpty else { return visibleItems.map(DisplayEntry.item) }
+        guard !slots.isEmpty || !cardGroups.isEmpty else {
+            return visible.map(DisplayEntry.item)
+        }
         var seenGroups: Set<UUID> = []
         var result: [DisplayEntry] = []
-        // 成员按版本次序（新→旧）排，不按它们在轨道上的先后。
-        var members: [UUID: [Item]] = [:]
-        for family in versionFamilies {
-            guard let groupID = family.orderedIDs.first else { continue }
-            let byID = Dictionary(uniqueKeysWithValues: visibleItems.map { ($0.id, $0) })
-            members[groupID] = family.orderedIDs.compactMap { byID[$0] }
-        }
 
-        for item in visibleItems {
+        // 一次建好，循环里直接查。原来这一句写在循环体内，每遇到一个分组成员
+        // 就把整份可见列表重建一遍字典——O(条目数²)，而它每帧都在跑。
+        let byID = Dictionary(uniqueKeysWithValues: visible.map { ($0.id, $0) })
+        let groupIndex = cardGroupIndex
+
+        for item in visible {
+            // 手动分组优先于版本合集：用户亲手归的类比程序认出来的关系更强，
+            // 而且同一张卡不能同时出现在两摞里。
+            if let group = groupIndex[item.id], activeCardGroup == nil {
+                guard seenGroups.insert(group.id).inserted else { continue }
+                let members = group.itemIDs.compactMap { byID[$0] }
+                if members.count >= 2 {
+                    result.append(.cardGroup(group, members))
+                    continue
+                }
+                // 成员被删到只剩一张时按普通卡片画，别留一个空壳分组。
+                result.append(.item(item))
+                continue
+            }
             guard let slot = slots[item.id] else {
                 result.append(.item(item))
                 continue
@@ -1024,7 +1430,14 @@ final class AppModel {
             // 拖进来存档），整摞不该因此跑到最前面去。
             guard slot.rank == 1, seenGroups.insert(slot.groupID).inserted else { continue }
             guard let collection = versionCollection(groupID: slot.groupID, count: slot.total),
-                  let group = members[slot.groupID], !group.isEmpty else {
+                  let family = versionFamilies.first(where: { $0.orderedIDs.first == slot.groupID })
+            else {
+                result.append(.item(item))
+                continue
+            }
+            // 成员按版本次序（新→旧）排，不按它们在轨道上的先后。
+            let group = family.orderedIDs.compactMap { byID[$0] }
+            guard !group.isEmpty else {
                 result.append(.item(item))
                 continue
             }
@@ -1089,7 +1502,105 @@ final class AppModel {
         }
     }
 
+    /// 决定 `visibleItems` 结果的那几个输入。任何一个变了就重算。
+    ///
+    /// 数组不进 key（比较它们本身就和重算一样贵），改用一个由 didSet 维护的
+    /// 修订号；其余全是标量，比较是常数时间。
+    @ObservationIgnored private var visibleItemsRevision = 0
+    @ObservationIgnored private var visibleItemsCache: (key: VisibleItemsKey, value: [Item])?
+
+    private struct VisibleItemsKey: Equatable {
+        var revision: Int
+        var tab: Tab
+        var query: String
+        var semanticQuery: String
+        var linkGroup: LinkGroup?
+        var cardGroup: UUID?
+        var privateUnlocked: Bool
+        var pinnedGeneration: Int
+        var groupGeneration: Int
+    }
+
+    private var visibleItemsKey: VisibleItemsKey {
+        VisibleItemsKey(
+            revision: visibleItemsRevision,
+            tab: activeTab,
+            query: query,
+            semanticQuery: semanticQuery,
+            linkGroup: activeLinkGroup,
+            cardGroup: activeCardGroup,
+            privateUnlocked: isPrivateSpaceUnlocked,
+            pinnedGeneration: pinnedLaneGeneration,
+            groupGeneration: cardGroupGeneration
+        )
+    }
+
+    /// 应用了分组筛选之后的可见条目。轨道画的是它。
+    ///
+    /// 带缓存：界面里有八九处会问它（空态判断、动画的 value、翻页、滚动定位…），
+    /// 而每一次都要把整份库过一遍筛选、排序、钉住区重排。切页签时这些调用又
+    /// 全都落在动画的每一帧上——卡顿和抖动就是这么来的。输入没变就直接返回
+    /// 上一次的结果。
     var visibleItems: [Item] {
+        let key = visibleItemsKey
+        if let visibleItemsCache, visibleItemsCache.key == key { return visibleItemsCache.value }
+        let value = computedVisibleItems
+        visibleItemsCache = (key, value)
+        let fingerprint = value.map(\.id)
+        if fingerprint != lastOrderFingerprint {
+            lastOrderFingerprint = fingerprint
+            orderRevision &+= 1
+        }
+        return value
+    }
+
+    /// 卡片顺序的修订号，给动画当触发值。
+    ///
+    /// 原来写的是 `value: visibleItems.map(\.id)`：那一句每帧都要重算整份
+    /// 可见列表、再新建一个 UUID 数组去比较——动画本身成了这条路径上最贵的
+    /// 一部分。换成一个 Int，比较是常数时间，而且只有顺序真的变了才自增。
+    var visibleOrderRevision: Int {
+        _ = visibleItems
+        return orderRevision
+    }
+
+    @ObservationIgnored private var orderRevision = 0
+    @ObservationIgnored private var lastOrderFingerprint: [UUID] = []
+
+    private var computedVisibleItems: [Item] {
+        let base = visibleItemsIgnoringGroupFilter
+        let filtered: [Item]
+        if let activeCardGroup,
+           let group = cardGroups.first(where: { $0.id == activeCardGroup }) {
+            let members = Set(group.itemIDs)
+            filtered = base.filter { members.contains($0.id) }
+        } else {
+            filtered = base
+        }
+        return orderedWithPinnedFirst(filtered)
+    }
+
+    /// 钉住的排在最前面，按钉住区自己的顺序；其余保持原来的次序。
+    ///
+    /// 用稳定重排而不是给它们改 `sortOrder`：钉住区的意义就是"后面来多少新
+    /// 东西都不动我"，而 sortOrder 的默认值是创建时间戳，新条目天然排最前。
+    /// 靠改写别人的值来维持这个不变量，改漏一次顺序就乱了。
+    private func orderedWithPinnedFirst(_ items: [Item]) -> [Item] {
+        let lane = pinnedLaneIDs
+        guard !lane.isEmpty else { return items }
+        let rank = Dictionary(uniqueKeysWithValues: lane.enumerated().map { ($0.element, $0.offset) })
+        var pinned: [Item] = []
+        var rest: [Item] = []
+        for item in items {
+            if rank[item.id] != nil { pinned.append(item) } else { rest.append(item) }
+        }
+        pinned.sort { (rank[$0.id] ?? 0) < (rank[$1.id] ?? 0) }
+        return pinned + rest
+    }
+
+    /// 分组筛选之前的那一份。顶部那排分组自己要用它判断"这组还有没有内容"，
+    /// 用 `visibleItems` 会自我循环：选中一组之后其余组全都变成空的。
+    var visibleItemsIgnoringGroupFilter: [Item] {
         // 隐私页签是唯一能看到隐私内容的地方，而且必须先解锁。
         if case .privateSpace = activeTab {
             guard isPrivateSpaceUnlocked else { return [] }
@@ -1377,6 +1888,9 @@ final class AppModel {
     /// 拖拽板上匹配自定义 UTI——自定义类型在 SwiftUI 的 drop 转换里不一定
     /// 存活，而同一进程里的共享状态百分之百可靠。
     var draggingItemID: UUID?
+    /// 正在拖的是一整个分组。分组不能被拖进别的分组——两组各自是用户归好的
+    /// 一个概念，合起来之后没有办法还原成原来的两堆。
+    var draggingGroupID: UUID?
 
     /// 拖拽结束（鼠标抬起）后清掉 draggingItemID 的一次性监听。
     /// 延迟 150ms 清理：performDrop 在 drop 事件里同步读这个值，
@@ -1400,6 +1914,9 @@ final class AppModel {
             Task { @MainActor [weak self] in
                 try? await Task.sleep(for: .milliseconds(150))
                 self?.draggingItemID = nil
+                // 组标记必须和卡片标记同生共死。松手落空时（拖到面板外、
+                // 中途取消）只清一个，下一次拖普通卡片就会被当成还在拖组。
+                self?.draggingGroupID = nil
             }
             return event
         }
@@ -1477,7 +1994,7 @@ final class AppModel {
 
     func open(_ item: Item) {
         if let url = item.linkURL {
-            LinkOpener.open(url, preferredBrowserBundleID: LinkSourceBrowserStore.bundleID(for: item.id))
+            LinkOpener.open(url, preferredBrowserBundleID: browserBundleID(for: item.id))
             return
         }
         Task {
@@ -2650,7 +3167,7 @@ final class AppModel {
         }
     }
 
-    private func showTransientFeedback(_ message: String) {
+    func showTransientFeedback(_ message: String) {
         feedbackTask?.cancel()
         feedbackMessage = message
         feedbackTask = Task { [weak self] in
@@ -3430,6 +3947,8 @@ final class AppModel {
             let survivingItemIDs = Set(items.map(\.id)).union(trashedItems.map(\.id))
             NearbyDeviceOrigin.prune(keeping: survivingItemIDs)
             LinkSourceBrowserStore.prune(keeping: survivingItemIDs)
+            CardGroupStore.prune(keeping: survivingItemIDs)
+            PinnedLaneStore.prune(keeping: survivingItemIDs)
             let survivingTodoIDs = Set(todos.map(\.id))
             TodoProvenanceStore.prune(
                 todoIDs: survivingTodoIDs,
@@ -4272,6 +4791,7 @@ final class AppModel {
                         self.enqueueAI(fresh)
                     }
                     await self.considerTodoDraftFromIndexedImage(id)
+                    await self.considerAutoGrouping(id)
                     await self.reload()
                 }
             }

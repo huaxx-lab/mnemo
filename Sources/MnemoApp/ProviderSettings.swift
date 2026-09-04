@@ -3,7 +3,6 @@ import CryptoKit
 import Foundation
 import ImageIO
 import Observation
-import Security
 import MnemoCore
 
 enum CredentialStoreError: Error, LocalizedError {
@@ -27,10 +26,7 @@ enum CredentialStoreError: Error, LocalizedError {
 ///
 /// 安全性上没有实质让步：登录钥匙串的默认保护是登录密码，而这个文件放在
 /// 用户主目录里、权限 0600，威胁模型相同；换来的是升级零打扰。
-///
-/// 升级路径：老版本把凭据存在钥匙串（service `com.pinland.app.ai-provider`）。
-/// 第一次读不到文件时去钥匙串取一次，写进文件后把钥匙串条目删掉——
-/// 从此以后这个应用与钥匙串再无关系。
+
 actor CredentialStore {
     struct File: Codable {
         var version: Int = 1
@@ -40,8 +36,6 @@ actor CredentialStore {
     private let fileURL: URL
     /// 进程内缓存：避免同一次功能链上反复读盘。
     private var cache: [String: String?] = [:]
-    /// 本进程内已经尝试过钥匙串迁移的供应商，避免重复触发系统弹窗。
-    private var migrated: Set<String> = []
 
     init(fileURL: URL? = nil) {
         self.fileURL = fileURL
@@ -54,13 +48,6 @@ actor CredentialStore {
         if let value = try loadFile().providers[providerID], !value.isEmpty {
             cache[providerID] = value
             return value
-        }
-        // 一次性迁移：老用户（或老版本）的凭据还在钥匙串里。
-        if migrated.insert(providerID).inserted,
-           let legacy = try? LegacyKeychain.read(providerID: providerID), !legacy.isEmpty {
-            try save(legacy, providerID: providerID)
-            try? LegacyKeychain.delete(providerID: providerID)
-            return legacy
         }
         cache[providerID] = String?.none
         return nil
@@ -98,41 +85,6 @@ actor CredentialStore {
         try? FileManager.default.setAttributes(
             [.posixPermissions: 0o600], ofItemAtPath: fileURL.path
         )
-    }
-}
-
-/// 只用于迁移的老钥匙串实现。新代码不应再调用它做日常读写。
-private enum LegacyKeychain {
-    private static let service = "com.pinland.app.ai-provider"
-
-    static func read(providerID: String) throws -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: providerID,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        if status == errSecItemNotFound { return nil }
-        guard status == errSecSuccess else { throw CredentialStoreError.unexpectedStatus(status) }
-        guard let data = result as? Data, let value = String(data: data, encoding: .utf8) else {
-            throw CredentialStoreError.invalidData
-        }
-        return value
-    }
-
-    static func delete(providerID: String) throws {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: providerID,
-        ]
-        let status = SecItemDelete(query as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw CredentialStoreError.unexpectedStatus(status)
-        }
     }
 }
 
@@ -290,7 +242,7 @@ final class ProviderSettingsModel {
             } else {
                 try await credentialStore.save(trimmed, providerID: providerID)
                 keyPresence[providerID] = true
-                statusMessage = "凭据已安全存入钥匙串"
+                statusMessage = "凭据已保存"
                 if !officiallyRefreshedProviderIDs.contains(providerID) {
                     await refreshModels(providerID: providerID)
                 }
@@ -578,6 +530,110 @@ final class ProviderSettingsModel {
         }
         merged.wasPrivacyBlocked = privacyBlocked
         return (changed || privacyBlocked) && !Task.isCancelled ? merged : nil
+    }
+
+    // MARK: - 分组
+
+    /// 给刚拖出来的一组卡片起个名字。
+    ///
+    /// 用户把两张卡叠在一起的那一刻，心里已经有一个词了（"招聘信息""房子"），
+    /// 只是懒得打。让模型看一眼这两张是什么，把那个词说出来——猜错了改一下
+    /// 就是，总好过一律叫"新分组 1"。
+    ///
+    /// 走分类那条路由：这本来就是分类任务，不值得为它单开一个功能项让用户
+    /// 再配一遍模型。
+    func nameGroup(summaries: [String]) async -> String? {
+        guard routing.route(for: .automaticClassification) != nil else { return nil }
+        let joined = summaries
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .prefix(6)
+            .enumerated()
+            .map { "\($0.offset + 1). \(String($0.element.prefix(200)))" }
+            .joined(separator: "\n")
+        guard !joined.isEmpty else { return nil }
+        do {
+            return try await completeStructured(
+                feature: .automaticClassification,
+                system: "你是 Mnemo 的分组命名器。只返回 JSON 对象，不要 Markdown。",
+                prompt: """
+                下面几条内容被用户归成了一组。用一个**不超过 6 个汉字**的短语概括它们的共同点，\
+                当作这个分组的名字。像文件夹名一样：名词短语，不要动词句，不要标点，不要引号。
+                返回 {"name":"..."}。
+
+                \(joined)
+                """,
+                privacyText: joined,
+                maxTokens: 60,
+                allowSensitiveContent: false,
+                parse: { output in
+                    let data = try AIStructuredOutput.objectData(from: output)
+                    guard let object = try? JSONSerialization.jsonObject(with: data)
+                            as? [String: Any],
+                          let name = object["name"] as? String else {
+                        throw AIExecutionError.malformedStructuredOutput
+                    }
+                    let trimmed = name.trimmingCharacters(
+                        in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "\"「」''"))
+                    )
+                    guard !trimmed.isEmpty else {
+                        throw AIExecutionError.malformedStructuredOutput
+                    }
+                    return String(trimmed.prefix(12))
+                }
+            )
+        } catch {
+            // 起名字失败不影响分组成立，本地那个"新分组 N"顶上。
+            return nil
+        }
+    }
+
+    /// 这条新内容属于已有的哪个分组，或者哪个都不属于。
+    ///
+    /// 模型只能在**给定的编号**里选，或者返回 0 表示不归。这样它指认不了
+    /// 清单外的东西，也没法凭空造一个新分组——建组永远是用户的动作。
+    func assignGroup(summary: String, groupNames: [String]) async -> Int? {
+        guard routing.route(for: .automaticClassification) != nil,
+              !groupNames.isEmpty else { return nil }
+        let content = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard content.count >= 4 else { return nil }
+        let list = groupNames.enumerated()
+            .map { "\($0.offset + 1). \($0.element)" }
+            .joined(separator: "\n")
+        do {
+            let index: Int = try await completeStructured(
+                feature: .automaticClassification,
+                system: "你是 Mnemo 的归类器。只返回 JSON 对象，不要 Markdown。",
+                prompt: """
+                用户有这些分组：
+                \(list)
+
+                下面这条新内容明显属于其中某一组吗？只有**很确定**时才选，\
+                拿不准一律返回 0——归错一条比漏归一条更烦人。
+                返回 {"group":编号}，不属于任何一组时 {"group":0}。
+
+                \(String(content.prefix(600)))
+                """,
+                privacyText: content,
+                maxTokens: 40,
+                allowSensitiveContent: false,
+                parse: { output in
+                    let data = try AIStructuredOutput.objectData(from: output)
+                    guard let object = try? JSONSerialization.jsonObject(with: data)
+                            as? [String: Any] else {
+                        throw AIExecutionError.malformedStructuredOutput
+                    }
+                    // 模型偶尔把编号写成字符串。它表达的意思没有歧义，接住即可。
+                    if let value = object["group"] as? Int { return value }
+                    if let text = object["group"] as? String, let value = Int(text) { return value }
+                    throw AIExecutionError.malformedStructuredOutput
+                }
+            )
+            guard index >= 1, index <= groupNames.count else { return nil }
+            return index - 1
+        } catch {
+            return nil
+        }
     }
 
     /// 待办协调：这段新看到的文字，对现有待办做了什么。

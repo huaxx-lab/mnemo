@@ -101,6 +101,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         model.openSettingsAction = { [weak self] in self?.showSettings() }
+        model.groupNamingAction = { [weak providerSettings] summaries in
+            await providerSettings?.nameGroup(summaries: summaries)
+        }
+        model.groupAssignmentAction = { [weak providerSettings] summary, names in
+            await providerSettings?.assignGroup(summary: summary, groupNames: names) ?? nil
+        }
         observeUpdatePresentation()
         // 启动后等几秒再查：别和首屏渲染、索引恢复抢启动带宽。
         Task { @MainActor [weak self] in

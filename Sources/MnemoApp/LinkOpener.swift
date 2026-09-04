@@ -64,6 +64,81 @@ enum LinkOpener {
 
     static func isBrowser(_ bundleID: String) -> Bool { browserBundleIDs.contains(bundleID) }
 
+    /// 这台机器上装了哪些浏览器。设置页拿它列选项，卡片拿它取图标。
+    struct InstalledBrowser: Identifiable, Hashable, Sendable {
+        var bundleID: String
+        var name: String
+        var appURL: URL
+        var id: String { bundleID }
+    }
+
+    /// 按名字排序，稳定可预期。系统默认那个排在最前——多数人就用它。
+    static var installedBrowsers: [InstalledBrowser] {
+        let systemDefault = URL(string: "https://example.com")
+            .flatMap { NSWorkspace.shared.urlForApplication(toOpen: $0) }
+            .flatMap { Bundle(url: $0)?.bundleIdentifier }
+        return browserBundleIDs
+            .compactMap { bundleID -> InstalledBrowser? in
+                guard let url = NSWorkspace.shared
+                    .urlForApplication(withBundleIdentifier: bundleID) else { return nil }
+                return InstalledBrowser(bundleID: bundleID, name: appName(at: url), appURL: url)
+            }
+            .sorted { lhs, rhs in
+                if lhs.bundleID == systemDefault { return true }
+                if rhs.bundleID == systemDefault { return false }
+                return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+            }
+    }
+
+    static func browserName(_ bundleID: String) -> String? {
+        NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID).map(appName(at:))
+    }
+
+    /// 浏览器自己的应用图标。卡片上那枚小徽标用它——不自己画图标，
+    /// 用户屏幕上其他地方看到的 Chrome 是什么样，这里就该是什么样。
+    ///
+    /// 同样必须缓存：`icon(forFile:)` 每次都会读盘并新建一个 NSImage。
+    /// 一屏几十张链接卡在滚动里反复调它，掉帧就是这么来的。
+    private static var iconCache: [String: NSImage] = [:]
+
+    static func browserIcon(_ bundleID: String) -> NSImage? {
+        if let cached = iconCache[bundleID] { return cached }
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
+            return nil
+        }
+        let icon = NSWorkspace.shared.icon(forFile: url.path)
+        iconCache[bundleID] = icon
+        return icon
+    }
+
+    /// 系统当前的默认浏览器。用户没有在设置里指定时就是它。
+    ///
+    /// 必须缓存：卡片上那枚徽标每帧都要问一次"这条链接会用哪个浏览器"，而
+    /// `urlForApplication(toOpen:)` 是一次 Launch Services 往返。一屏几十张卡
+    /// 乘以 60fps，滚动直接卡死。默认浏览器在应用运行期间几乎不会变，
+    /// 变了大不了下次启动生效。
+    static let systemDefaultBrowserBundleID: String? = URL(string: "https://example.com")
+        .flatMap { NSWorkspace.shared.urlForApplication(toOpen: $0) }
+        .flatMap { Bundle(url: $0)?.bundleIdentifier }
+
+    /// 只走浏览器，不看有没有对应的原生 App。
+    ///
+    /// 和 `open` 是两个不同的意图：那个是"打开这条内容"（B 站链接优先进
+    /// B 站 App），这个是"在网页里看"。卡片上两枚徽标各自对应一个，
+    /// 用户不用先猜会跳到哪儿。
+    @discardableResult
+    static func openInBrowser(_ url: URL, bundleID: String?) -> String {
+        if let bundleID,
+           let browser = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+            NSWorkspace.shared.open(
+                [url], withApplicationAt: browser, configuration: NSWorkspace.OpenConfiguration()
+            )
+            return appName(at: browser)
+        }
+        NSWorkspace.shared.open(url)
+        return "默认浏览器"
+    }
+
     /// 能打开这条链接、而且不是浏览器的那个 App。
     ///
     /// 有多个时取第一个：系统按用户的默认设置排序，它比我们自己挑更合理。

@@ -143,6 +143,14 @@ public extension Item {
     /// 唯一出口。以前每个调用点各自 `URL(string: inlineText)`，于是"分享文案
     /// 里夹着链接"这种情况要在七八个地方分别补一次——补漏一处就表现为
     /// "卡片上有图标但点了没反应"。
+    /// 这条内容指向的链接。
+    ///
+    /// 便宜的判据先跑：整段就是一个 URL 的情况一次字符串解析就出结果，
+    /// 只有"文字里夹着分享链接"才值得动 NSDataDetector。区别很大——检测器
+    /// 要扫全文，而卡片排版对每一条都会问一次。
+    ///
+    /// 更重要的是长度闸门：一段几千字的笔记里夹着链接的可能性很低，而对它
+    /// 跑一次检测器的代价却和字数成正比。超过这个长度只认开头那一段。
     var linkURL: URL? {
         guard case .inline(let text) = holding else { return nil }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -152,6 +160,9 @@ public extension Item {
            direct.host() != nil {
             return direct
         }
+        // 分享文案都很短（几十到几百字）。再长的多半是正文，里面即便有网址
+        // 也不是"这条内容就是那个链接"的意思。
+        guard trimmed.count <= 600 else { return nil }
         return ShareLinkExtractor.first(in: text)?.url
     }
 }
