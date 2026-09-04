@@ -22,7 +22,7 @@ export DEVELOPER_DIR
 CONFIG="${1:-release}"
 # 版本号默认就是当前发布版；MNEMO_VERSION 可以覆盖，用来打一个"旧版"包
 # 在本机验证远程更新流程，不必为此改一次源码再改回去。
-VERSION="${MNEMO_VERSION:-3.1}"
+VERSION="${MNEMO_VERSION:-3.2}"
 SCRATCH="${MNEMO_SCRATCH:-/tmp/mnemo-build}"
 # 在**同步目录之外**组装并签名，最后才拷回 build/。
 #
