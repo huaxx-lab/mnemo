@@ -69,22 +69,40 @@ struct UpdateWindow: View {
         case .downloading(let progress, let received, let total):
             Spacer()
             VStack(spacing: 12) {
-                ProgressView(value: progress)
-                    .progressViewStyle(.linear)
+                // 一次真实下载测下来：前约 1 秒全花在建连、TLS 和 GitHub 跳到
+                // CDN 上，一个字节都没到；27 次进度回调全挤在之后的 0.4 秒里。
+                // 这段时间画一条 0% 的确定型进度条，看着就是"卡住了然后突然
+                // 跑完"。字节还没开始流就老实说在连接，别假装在下载。
+                if received <= 0 || total <= 0 {
+                    ProgressView()
+                        .progressViewStyle(.linear)
+                        .frame(width: 300)
+                    HStack {
+                        Text("正在连接…")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                        Spacer(minLength: 0)
+                    }
                     .frame(width: 300)
-                HStack {
-                    Text("\(Int(progress * 100))%")
-                        .font(.system(size: 12, weight: .semibold))
-                        .monospacedDigit()
-                    Spacer(minLength: 0)
-                    if total > 0 {
+                } else {
+                    ProgressView(value: progress)
+                        .progressViewStyle(.linear)
+                        .frame(width: 300)
+                        // 回调之间隔着几十毫秒，不补间的话每一格都是瞬移。
+                        .animation(.easeOut(duration: 0.25), value: progress)
+                    HStack {
+                        Text("\(Int(progress * 100))%")
+                            .font(.system(size: 12, weight: .semibold))
+                            .monospacedDigit()
+                            .contentTransition(.numericText())
+                        Spacer(minLength: 0)
                         Text("\(ByteFormat.short(received)) / \(ByteFormat.short(total))")
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
                     }
+                    .frame(width: 300)
                 }
-                .frame(width: 300)
             }
             Spacer()
         case .installing:
