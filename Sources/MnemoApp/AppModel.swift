@@ -449,6 +449,10 @@ final class AppModel {
     private(set) var notchPresentation = NotchPresentationState()
     var isIndexing = false
     private(set) var isAIProcessing = false
+    /// 待办理解正在后台跑（队列里有输入或模型调用进行中）。
+    /// 只描述"这一秒有没有在工作"；`pendingTodoScanIDs` 里等索引的截图不算——
+    /// 那是排队资格，不是进行中的活动，把它算进来刘海会一连亮几天。
+    private(set) var isRecognizingTodos = false
     var isPinnedOpen = false
     private(set) var inboundPayloadKind: InboundPayloadKind = .unknown
     private(set) var edgeStatusSignal: EdgeStatusSignal?
@@ -2040,8 +2044,9 @@ final class AppModel {
         if focusTimer.phase == .running { return .timing }
         if focusTimer.phase == .paused { return .paused }
         // 正在判断这次复制要不要检索时也让刘海动起来，否则中间那一两秒
-        // 完全没有反馈，看着像什么都没发生。
-        if isIndexing || isAIProcessing || isResolvingContext { return .indexing }
+        // 完全没有反馈，看着像什么都没发生。待办理解同理：模型那一两轮
+        // ReAct 调用是秒级的，跑的时候两翼的点要动着。
+        if isIndexing || isAIProcessing || isResolvingContext || isRecognizingTodos { return .indexing }
         return .idle
     }
 
@@ -2839,6 +2844,9 @@ final class AppModel {
             fromNearbyDevice: fromNearbyDevice,
             enqueuedAt: now
         ))
+        // 从这一刻起后台就在为用户识别待办了——让刘海动起来的事实在这里翻开，
+        // 队列真正 drain 完才合上。识别出结果后 todoDraft 候选卡自己会接管刘海。
+        isRecognizingTodos = true
         // 积压超过这个数说明用户在批量粘贴，最老的那些已经没人关心了。
         if todoIntakeQueue.count > 8 {
             todoIntakeQueue.removeFirst(todoIntakeQueue.count - 8)
@@ -2857,7 +2865,9 @@ final class AppModel {
             guard let self else { return }
             defer {
                 self.todoIntakeTask = nil
-                // 处理期间可能又有新内容进来；自己接着跑完。
+                // 处理期间可能又有新内容进来；自己接着跑完。队列空了才合上
+                // "正在识别"的灯——还在跑 / 还有积压时它得继续亮着。
+                self.isRecognizingTodos = !self.todoIntakeQueue.isEmpty
                 if !self.todoIntakeQueue.isEmpty { self.drainTodoIntake() }
             }
             while self.todoIntakeEnabled, !self.todoIntakeQueue.isEmpty {
@@ -3492,6 +3502,7 @@ final class AppModel {
         todoIntakeTask?.cancel()
         activeTodoIntakeSourceID = nil
         todoIntakeQueue.removeAll()
+        isRecognizingTodos = false
         clearTodoPrompt()
     }
 

@@ -732,7 +732,10 @@ private struct CollapsedBar: View {
         case .dropTargeted: "松手即可收纳"
         case .timing: "专注剩余 \(trailingLabel)"
         case .paused: "专注已暂停，剩余 \(trailingLabel)"
-        case .indexing: model.isAIProcessing ? "正在智能整理" : "正在建立索引"
+        case .indexing:
+            model.isRecognizingTodos
+                ? "正在识别待办"
+                : model.isAIProcessing ? "正在智能整理" : "正在建立索引"
         case .syncing: "正在同步"
         case .suggesting:
             if let first = model.contextSuggestions.first, first.didAutoCopy {
