@@ -170,10 +170,13 @@ final class UpdateCoordinator: NSObject {
     /// 中间任何一步失败都不会留下半个安装：先复制到 /Applications 旁的临时
     /// 位置再原子替换，比"先删后拷"安全——拷坏了旧的还在。
     static func installDMG(_ dmg: URL) async throws {
-        let mountPoint = try await run("/usr/bin/hdiutil", ["attach", "-nobrowse", "-quiet", dmg.path])
-        let mountedVolume = mountPoint.trimmingCharacters(in: .whitespacesAndNewlines)
-            .components(separatedBy: "\t").last ?? ""
-        let volume = URL(filePath: mountedVolume)
+        // `-quiet` 的意思就是"什么都不打印"，原来却要去解析它的 stdout 找挂载点，
+        // 拿到的永远是空串，于是每次安装都停在"映像里没有 .app"。改用 `-plist`：
+        // 输出是结构化的，卷名里有空格也不会被切错。
+        let output = try await run("/usr/bin/hdiutil", ["attach", "-nobrowse", "-plist", dmg.path])
+        guard let volume = mountPoint(fromAttachPlist: output) else {
+            throw UpdateError.install("挂载映像失败")
+        }
         defer {
             Task.detached {
                 _ = try? await run("/usr/bin/hdiutil", ["detach", "-quiet", volume.path])
@@ -198,6 +201,23 @@ final class UpdateCoordinator: NSObject {
         try? FileManager.default.removeItem(at: dmg)
     }
 
+    /// 从 `hdiutil attach -plist` 的输出里取挂载点。
+    ///
+    /// 一张映像会列出好几个 system-entity（分区表、各分区），只有真正挂上的
+    /// 那个带 mount-point。
+    static func mountPoint(fromAttachPlist output: String) -> URL? {
+        guard let data = output.data(using: .utf8),
+              let plist = try? PropertyListSerialization.propertyList(
+                  from: data, options: [], format: nil
+              ) as? [String: Any],
+              let entities = plist["system-entities"] as? [[String: Any]]
+        else { return nil }
+        let path = entities
+            .compactMap { $0["mount-point"] as? String }
+            .first { !$0.isEmpty }
+        return path.map { URL(filePath: $0) }
+    }
+
     private func relaunch() {
         let app = URL(filePath: "/Applications/Mnemo.app")
         let configuration = NSWorkspace.OpenConfiguration()
@@ -213,9 +233,13 @@ final class UpdateCoordinator: NSObject {
             let process = Process()
             process.executableURL = URL(filePath: executable)
             process.arguments = arguments
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = pipe
+            // 两条流必须分开收。合在一个管道里的话，hdiutil 那条
+            // "'hdiutil attach -nobrowse' is deprecated" 的警告会混进 stdout，
+            // 拼在 XML 前面，plist 直接解析失败。
+            let out = Pipe()
+            let err = Pipe()
+            process.standardOutput = out
+            process.standardError = err
             do {
                 try process.run()
             } catch {
@@ -223,14 +247,20 @@ final class UpdateCoordinator: NSObject {
                 return
             }
             process.terminationHandler = { process in
-                let output = String(
-                    data: pipe.fileHandleForReading.readDataToEndOfFile(),
+                let stdout = String(
+                    data: out.fileHandleForReading.readDataToEndOfFile(),
+                    encoding: .utf8
+                ) ?? ""
+                let stderr = String(
+                    data: err.fileHandleForReading.readDataToEndOfFile(),
                     encoding: .utf8
                 ) ?? ""
                 if process.terminationStatus == 0 {
-                    continuation.resume(returning: output)
+                    continuation.resume(returning: stdout)
                 } else {
-                    continuation.resume(throwing: UpdateError.install(output.trimmingCharacters(in: .whitespacesAndNewlines)))
+                    let detail = (stderr.isEmpty ? stdout : stderr)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    continuation.resume(throwing: UpdateError.install(detail))
                 }
             }
         }
@@ -285,12 +315,17 @@ extension UpdateCoordinator: URLSessionDownloadDelegate {
         // 文件先被删，Task 再去搬就只剩
         // "couldn't be moved … the former doesn't exist"。
         let outcome = Self.persistDownloadedDMG(from: location)
+        let received = downloadTask.countOfBytesReceived
         Task { @MainActor in
             self.downloadTask = nil
             self.downloadSession?.finishTasksAndInvalidate()
             self.downloadSession = nil
             switch outcome {
             case .success(let url):
+                // 先把进度条补满。几 MB 的包眨眼就下完，最后一次
+                // didWriteData 常常还没来得及渲染就被"正在安装"顶掉，
+                // 看着就像"没跑完就开始装了"。
+                self.phase = .downloading(progress: 1, received: received, total: received)
                 self.install(dmg: url)
             case .failure(let error):
                 self.phase = .failed("下载文件保存失败：\(error.localizedDescription)")
