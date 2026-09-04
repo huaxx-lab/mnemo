@@ -94,7 +94,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
-  <key>CFBundleVersion</key><string>3</string>
+  <key>CFBundleVersion</key><string>4</string>
   <key>MnemoBuildID</key><string>$BUILD_ID</string>
   <key>MnemoBuildDate</key><string>$BUILD_DATE</string>
   <key>LSMinimumSystemVersion</key><string>26.0</string>
