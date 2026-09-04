@@ -237,12 +237,14 @@ func reconciliationIsFastEnough() {
         + [meeting, report]
     let chat = String(repeating: "小王：随便聊两句，没什么要紧的事。\n", count: 40)
         + "导师：组会改到四点\n"
-    let started = Date()
-    for _ in 0..<20 {
-        _ = TodoReconciler.plan(text: chat, draft: nil, todos: todos, now: now, calendar: calendar)
-    }
-    let perRun = Date().timeIntervalSince(started) / 20
-    #expect(perRun < 0.02, "单次协调 \(String(format: "%.2f", perRun * 1000)) ms")
+    let perRun = cpuSeconds {
+        for _ in 0..<20 {
+            _ = TodoReconciler.plan(
+                text: chat, draft: nil, todos: todos, now: now, calendar: calendar
+            )
+        }
+    } / 20
+    #expect(perRun < 0.02, "单次协调 \(String(format: "%.2f", perRun * 1000)) ms CPU")
 }
 
 @Test("本地回退不会再把多个草稿截成第一条")

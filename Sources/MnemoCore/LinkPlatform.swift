@@ -11,6 +11,7 @@ public enum LinkPlatform: String, CaseIterable, Sendable, Codable, Hashable {
     case bilibili, youtube, douyin, kuaishou, tiktok, netflix, iqiyi, youku, tencentVideo
     // 社交 / 社区
     case xiaohongshu, weibo, zhihu, x, instagram, reddit, facebook, threads, douban, tieba
+    case linuxdo
     // 音乐 / 播客
     case spotify, appleMusic, neteaseMusic, qqMusic, ximalaya
     // 内容 / 工具
@@ -35,6 +36,7 @@ public enum LinkPlatform: String, CaseIterable, Sendable, Codable, Hashable {
         (.tencentVideo, ["v.qq.com"]),
 
         (.xiaohongshu, ["xiaohongshu.com", "xhslink.com"]),
+        (.linuxdo, ["linux.do"]),
         (.weibo, ["weibo.com", "weibo.cn"]),
         // 知乎专栏和知乎主站是同一个域名下的不同路径，靠 path 再分一次。
         (.zhihu, ["zhihu.com", "zhihu.com.cn"]),
@@ -107,6 +109,7 @@ public enum LinkPlatform: String, CaseIterable, Sendable, Codable, Hashable {
         case .youku: "优酷"
         case .tencentVideo: "腾讯视频"
         case .xiaohongshu: "小红书"
+        case .linuxdo: "LINUX DO"
         case .weibo: "微博"
         case .zhihu: "知乎"
         case .zhihuZhuanlan: "知乎专栏"
@@ -152,7 +155,7 @@ public enum LinkPlatform: String, CaseIterable, Sendable, Codable, Hashable {
              .netflix, .iqiyi, .youku, .tencentVideo:
             .video
         case .xiaohongshu, .weibo, .zhihu, .zhihuZhuanlan, .x, .instagram,
-             .reddit, .facebook, .threads, .douban, .tieba:
+             .reddit, .facebook, .threads, .douban, .tieba, .linuxdo:
             .social
         case .spotify, .appleMusic, .neteaseMusic, .qqMusic, .ximalaya:
             .audio
@@ -197,6 +200,7 @@ public enum LinkPlatform: String, CaseIterable, Sendable, Codable, Hashable {
         case .youku: "youku"
         case .tencentVideo: "tencent-video"
         case .xiaohongshu: "xiaohongshu"
+        case .linuxdo: "linuxdo"
         case .weibo: "weibo"
         case .zhihu, .zhihuZhuanlan: "zhihu"
         case .x: "x"

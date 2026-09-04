@@ -16,6 +16,10 @@ public protocol ItemStore: Actor {
     /// 全量加载在几百块时无所谓，库大了就是每敲一次回车读一遍整张表。
     func chunks(itemIDs: Set<UUID>) throws -> [ContentChunk]
     func replaceChunks(itemID: UUID, with chunks: [ContentChunk]) throws
+    /// 原子替换 RAG 分块并更新承载聚合向量/标题的 Item。
+    /// 重新解析链接不能先提交新分块、再单独提交 Item：第二次保存失败会留下
+    /// 新正文配旧向量（反过来也可能），检索状态自相矛盾。
+    func replaceChunks(itemID: UUID, with chunks: [ContentChunk], updating item: Item) throws
     func deleteChunks(itemID: UUID) throws
     func allTodos() throws -> [Todo]
     func todo(id: UUID) throws -> Todo?
@@ -137,6 +141,14 @@ public actor InMemoryItemStore: ItemStore {
 
     public func replaceChunks(itemID: UUID, with chunks: [ContentChunk]) throws {
         indexedChunks[itemID] = chunks
+    }
+
+    public func replaceChunks(
+        itemID: UUID, with chunks: [ContentChunk], updating item: Item
+    ) throws {
+        guard item.id == itemID else { return }
+        indexedChunks[itemID] = chunks.filter { $0.itemID == itemID }
+        items[itemID] = item
     }
 
     public func deleteChunks(itemID: UUID) throws { indexedChunks[itemID] = nil }

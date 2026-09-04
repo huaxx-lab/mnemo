@@ -1825,55 +1825,42 @@ private struct GroupDetachDropDelegate: DropDelegate {
     @Bindable var model: AppModel
     @Binding var isDetaching: Bool
     @Binding var boundary: BoundaryHighlight
+    /// 边缘感应带用同一个 delegate，只是额外驱动自动翻页。共用一份"落到空白
+    /// 处等于离开当前区"的解释——两处各写一份，必然有一处漏掉。
+    var edgeScroll: ((Bool) -> Void)?
+    var edgeForward = false
 
-    /// 落在空白处意味着什么，取决于手里拖的是什么：分组里的卡是"拿出来"，
-    /// 钉住的卡是"松开钉子"。两者都是"离开它现在待的那个区"，所以共用一个
-    /// 投放层——用户的动作是同一个，没必要让他记住两个不同的落点。
-    private enum Intent { case none, detachGroup, unpin }
-
-    private var intent: Intent {
-        // 手里是一整个组时，任何"落到空白处"都是无操作——绝不能按成员身份
-        // 解释这次拖拽。draggingItemID 这时是组里第一张卡（拖拽负载用的它），
-        // 不挡这一句的话，拖一组到空松手，第一个成员会被踢出组——
-        // 用户看到的是"拖一组过去，结果崩出来一张卡"。
-        guard case .item(let id) = model.outboundDrag else { return .none }
-        if model.cardGroup(of: id) != nil { return .detachGroup }
-        if model.isPinnedToFront(id) { return .unpin }
-        return .none
+    func validateDrop(info: DropInfo) -> Bool {
+        // 边缘带即使这次投放没有语义也要接住：不接的话它上面的投放会掉进
+        // 下面的目标，用户在边缘松手就变成一次意外的换位。
+        edgeScroll != nil || model.leaveZoneIntent() != .none
     }
 
-    func validateDrop(info: DropInfo) -> Bool { intent != .none }
-
     func dropEntered(info: DropInfo) {
-        switch intent {
+        edgeScroll?(true)
+        switch model.leaveZoneIntent() {
         case .none: break
         case .detachGroup: isDetaching = true
-        case .unpin: boundary = .unpinning
+        case .unpin, .unpinGroup: boundary = .unpinning
         }
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
-        guard intent != .none else { return nil }
+        guard validateDrop(info: info) else { return nil }
         return DropProposal(operation: .move)
     }
 
     func dropExited(info: DropInfo) {
+        edgeScroll?(false)
         isDetaching = false
         if boundary == .unpinning { boundary = .none }
     }
 
     func performDrop(info: DropInfo) -> Bool {
-        guard case .item(let id) = model.outboundDrag else { return false }
-        let action = intent
+        edgeScroll?(false)
         isDetaching = false
         boundary = .none
-        model.completeOutboundDrop()
-        switch action {
-        case .none: return false
-        case .detachGroup: model.detachFromGroup(id)
-        case .unpin: model.unpinFromFront(id)
-        }
-        return true
+        return model.applyLeaveZoneDrop()
     }
 }
 
@@ -1995,25 +1982,162 @@ private struct PinReorderDropDelegate: DropDelegate {
     }
 }
 
-private struct TrackScrollMetrics: Equatable {
-    var offset: CGFloat
-    var viewport: CGFloat
-    var content: CGFloat
+/// 卡片轨道只有一个滚动权威：底层 NSScrollView。
+///
+/// SwiftUI 的 ScrollPosition 是双向状态，用户每滚一像素都会让包含所有卡片的
+/// StashWorkspace 重算；再叠 `.viewAligned` 更会和箭头争抢位置。这个控制器
+/// 直接读写真实 NSClipView，触控板和箭头共享同一个 offset，没有第二套状态。
+@MainActor
+private final class CardTrackScrollController: NSObject {
+    weak var scrollView: NSScrollView?
+    var onAvailability: ((Bool, Bool) -> Void)?
+    private var connectionOwner: ObjectIdentifier?
+    private var isPaging = false
 
-    static let zero = TrackScrollMetrics(offset: 0, viewport: 0, content: 0)
-    var maxOffset: CGFloat { max(0, content - viewport) }
-    var hasOverflow: Bool { maxOffset > 2 }
-    func canMove(forward: Bool) -> Bool {
-        forward ? offset < maxOffset - 2 : offset > 2
+    func connect(_ scrollView: NSScrollView?, owner: ObjectIdentifier) {
+        if self.scrollView === scrollView {
+            connectionOwner = owner
+            publishAvailability()
+            return
+        }
+        disconnect()
+        self.scrollView = scrollView
+        connectionOwner = owner
+        guard let scrollView else { return }
+        let clip = scrollView.contentView
+        clip.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(geometryChanged),
+            name: NSView.boundsDidChangeNotification,
+            object: clip
+        )
+        if let document = scrollView.documentView {
+            document.postsFrameChangedNotifications = true
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(geometryChanged),
+                name: NSView.frameDidChangeNotification,
+                object: document
+            )
+        }
+        publishAvailability()
+    }
+
+    func disconnect(owner: ObjectIdentifier? = nil) {
+        if let owner, connectionOwner != owner { return }
+        NotificationCenter.default.removeObserver(self)
+        scrollView = nil
+        connectionOwner = nil
+        isPaging = false
+    }
+
+    @objc private func geometryChanged() { publishAvailability() }
+
+    private var range: (current: CGFloat, minimum: CGFloat, maximum: CGFloat, viewport: CGFloat)? {
+        guard let scrollView, let document = scrollView.documentView else { return nil }
+        let clip = scrollView.contentView
+        let minimum = document.bounds.minX
+        let maximum = max(minimum, document.bounds.maxX - clip.bounds.width)
+        return (clip.bounds.origin.x, minimum, maximum, clip.bounds.width)
+    }
+
+    private func publishAvailability() {
+        guard let range else { onAvailability?(false, false); return }
+        onAvailability?(
+            range.current > range.minimum + 2,
+            range.current < range.maximum - 2
+        )
+    }
+
+    func scrollToStart() {
+        guard let scrollView, let range else { return }
+        scrollView.contentView.scroll(to: NSPoint(x: range.minimum, y: scrollView.contentView.bounds.origin.y))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        publishAvailability()
+    }
+
+    @discardableResult
+    func page(forward: Bool, fraction: CGFloat = 1, duration: Double = 0.2) -> Bool {
+        guard !isPaging, let scrollView, let range else { return false }
+        let step = max(120, range.viewport - 48) * fraction
+        let target = min(
+            max(range.minimum, range.current + (forward ? step : -step)),
+            range.maximum
+        )
+        guard abs(target - range.current) > 1 else { return false }
+        let clip = scrollView.contentView
+        isPaging = true
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = duration
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            clip.animator().setBoundsOrigin(NSPoint(x: target, y: clip.bounds.origin.y))
+        } completionHandler: { [weak self] in
+            self?.isPaging = false
+            self?.publishAvailability()
+        }
+        return true
+    }
+}
+
+private struct CardTrackScrollProbe: NSViewRepresentable {
+    let controller: CardTrackScrollController
+    let onAvailability: (Bool, Bool) -> Void
+
+    final class ProbeView: NSView {
+        weak var controller: CardTrackScrollController?
+        weak var connectedScrollView: NSScrollView?
+
+        override func viewDidMoveToSuperview() {
+            super.viewDidMoveToSuperview()
+            connectLater()
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            connectLater()
+        }
+
+        private func connectLater() {
+            Task { @MainActor [weak self] in
+                await Task.yield()
+                guard let self, superview != nil else { return }
+                connectedScrollView = enclosingScrollView
+                controller?.connect(connectedScrollView, owner: ObjectIdentifier(self))
+            }
+        }
+    }
+
+    func makeNSView(context: Context) -> ProbeView {
+        let view = ProbeView(frame: .zero)
+        view.controller = controller
+        return view
+    }
+
+    func updateNSView(_ view: ProbeView, context: Context) {
+        controller.onAvailability = onAvailability
+        view.controller = controller
+        Task { @MainActor [weak view] in
+            await Task.yield()
+            guard let view, view.superview != nil else { return }
+            view.connectedScrollView = view.enclosingScrollView
+            controller.connect(view.connectedScrollView, owner: ObjectIdentifier(view))
+        }
+    }
+
+    static func dismantleNSView(_ view: ProbeView, coordinator: ()) {
+        view.controller?.disconnect(owner: ObjectIdentifier(view))
     }
 }
 
 private struct StashWorkspace: View {
     @Bindable var model: AppModel
     @State private var hoveringTrack = false
-    @State private var scrollPosition = ScrollPosition(x: 0)
-    /// 真实滚动几何。分页按像素算，不再假设"三张卡 = 一页"。
-    @State private var trackScroll = TrackScrollMetrics.zero
+    /// AppKit 单一滚动权威；引用对象内部 offset 变化不触发 SwiftUI 卡片树重算。
+    @State private var scrollController = CardTrackScrollController()
+    /// 只有越过左右端点时才变化，箭头因此只重绘两次，不是每像素一次。
+    @State private var canPageBackward = false
+    @State private var canPageForward = false
     /// 正在拖动的卡片当前悬在哪个目标上、插到它前面还是后面。
     @State private var reorderTargetID: UUID?
     @State private var reorderInsertAfter = false
@@ -2093,6 +2217,8 @@ private struct StashWorkspace: View {
                 // 标题 + 筛选行始终占同样高度。旧实现只有链接 / 有分组时才插入
                 // 26pt 的 platformRow，还把 tabs 高度从 36 改成 30；切页签时卡片
                 // 整排瞬移 26–32pt，再叠上淡入，看起来就是抖。
+                // 页签的任何状态都不再改变尺寸（高亮只是描边+底色），
+                // 所以这一行按静止态给高度就够，不必为放大态留余量。
                 tabs.frame(height: 30)
                 platformRow.frame(height: 26)
             }
@@ -2101,8 +2227,7 @@ private struct StashWorkspace: View {
                 EmptyStash(model: model)
                     .frame(maxWidth: .infinity, maxHeight: isAnswering ? cardTrackHeight : .infinity)
             } else {
-                ScrollViewReader { proxy in
-                    ScrollView(.horizontal, showsIndicators: false) {
+                ScrollView(.horizontal, showsIndicators: false) {
                         LazyHStack(spacing: 8) {
                             // 一次取好，循环里查表。原来每张卡都调一次
                             // `model.versionSlots`，而它内部要按可见列表重算
@@ -2223,7 +2348,10 @@ private struct StashWorkspace: View {
                                     )
                                     // 残影修复：拖拽副本跟着指针走时，原位那张保持全亮，
                                     // 两张叠着看就是"残影"。拖进列表范围后把原位压暗。
-                                    .opacity(isLiftedSource ? 0.25 : 1)
+                                    // 0.25 太狠：拖拽一开始原位卡就像"消失"了，
+                                    // 用户以为拖丢了。0.62 足够和跟随指针的拖拽
+                                    // 预览区分开，又明显还在原位。
+                                    .opacity(isLiftedSource ? 0.62 : 1)
                                     .animation(.easeOut(duration: 0.15), value: isLiftedSource)
                                     .overlay(alignment: .leading) {
                                         if reorderTargetID == item.id && !reorderInsertAfter {
@@ -2247,6 +2375,7 @@ private struct StashWorkspace: View {
                                             reorderTargetID: $reorderTargetID,
                                             insertAfter: $reorderInsertAfter,
                                             mergeTargetID: $mergeTargetID,
+                                            allowsMerge: model.activeTab == .all,
                                             perform: { draggedID, anchorID, after in
                                                 withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                                                     model.moveCard(draggedID, anchor: anchorID, after: after)
@@ -2269,7 +2398,27 @@ private struct StashWorkspace: View {
                             }
                         }
                         .padding(.vertical, 8)
-                        .scrollTargetLayout()
+                        // 探针必须住在 documentView 内部，才能稳定拿到
+                        // enclosingScrollView；挂在 ScrollView 外层 background 上时
+                        // 某些 SwiftUI 层级会得到 nil，箭头就“看得到但点不动”。
+                        .background {
+                            CardTrackScrollProbe(
+                                controller: scrollController,
+                                onAvailability: { backward, forward in
+                                    if backward != canPageBackward { canPageBackward = backward }
+                                    if forward != canPageForward { canPageForward = forward }
+                                }
+                            )
+                            .frame(width: 0, height: 0)
+                        }
+                        // 这里**不挂**隐式动画。
+                        //
+                        // 投放的每一条路径都已经用 withAnimation 显式包住了换位，
+                        // 再挂一条 `.animation(value:)` 就是同一次位移被两个事务
+                        // 同时插值：格子按 A 曲线走，滚动内容按 B 曲线走，中途那
+                        // 几帧画在互相错开的位置上——换位之后翻页会重叠闪烁，
+                        // 就是这么来的。一次变化只能有一个动画驱动者。
+                        // 异步来的重排（归组、折叠）由各自的调用点自己包动画。
                         // 内容顶部对齐贴着页签往下排；剩余空间留在底部是"生长空间"，
                         // 上下居中则会读出两道无意义的黑边。
                         .frame(maxHeight: .infinity, alignment: .top)
@@ -2279,16 +2428,6 @@ private struct StashWorkspace: View {
                     // 两者画出来一样，但 scrollTo 只认前者：用 padding 时，
                     // "滚到第一张"会把那 12pt 一起滚出视野，第一张直接贴住左边，
                     // 和平时的间距对不上——双击标题栏跳回开头就会看到这个。
-                    .scrollPosition($scrollPosition)
-                    .onScrollGeometryChange(for: TrackScrollMetrics.self) { geometry in
-                        TrackScrollMetrics(
-                            offset: max(0, geometry.contentOffset.x),
-                            viewport: geometry.containerSize.width,
-                            content: geometry.contentSize.width
-                        )
-                    } action: { _, metrics in
-                        if metrics != trackScroll { trackScroll = metrics }
-                    }
                     .contentMargins(.horizontal, 12, for: .scrollContent)
 
                     // 「拖到空白处 = 离开当前的区」这一层必须铺满整条轨道，
@@ -2308,11 +2447,8 @@ private struct StashWorkspace: View {
                             )
                             .overlay { DetachHint(active: isDetachingFromGroup) }
                     }
-                    .scrollTargetBehavior(.viewAligned)
                     .onChange(of: model.scrollToFirstCardRequest) {
-                        withAnimation(.smooth(duration: 0.26)) {
-                            scrollPosition.scrollTo(x: 0)
-                        }
+                        scrollController.scrollToStart()
                     }
                     // 一行只看得到三张，后面还有多少全靠猜。悬停时在两边给出
                     // 把手：横向滚动照常可用，但不再是唯一入口。
@@ -2323,10 +2459,9 @@ private struct StashWorkspace: View {
                     // 再回来重新拿起它。
                     .overlay(alignment: .leading) { edgeScroller(forward: false) }
                     .overlay(alignment: .trailing) { edgeScroller(forward: true) }
-                }
                 .opacity(trackFade)
                 .frame(height: isAnswering ? cardTrackHeight : nil)
-                .frame(maxHeight: isAnswering ? nil : .infinity)
+                .frame(maxHeight: isAnswering ? nil : CGFloat.infinity)
                 // 拖拽一结束就把所有投放态的残留清掉。
                 //
                 // `dropExited` 只在指针**离开某个目标**时才来；如果用户在目标
@@ -2337,12 +2472,9 @@ private struct StashWorkspace: View {
                 .onChange(of: model.outboundDrag) { _, drag in
                     if drag == nil { clearDragFeedback() }
                 }
-                // 手风琴：旧版本进出轨道要有推开 / 合拢的过程。直接出现和
-                // 直接消失会让人以为卡片被删了或者凭空多了几张。
-                .animation(
-                    .spring(response: 0.36, dampingFraction: 0.78),
-                    value: model.expandedVersionGroups
-                )
+                // 展开/折叠动画只留在对应 Accordion 内部。这里不能给整条
+                // ScrollView 挂隐式动画——它会把程序化滚动偏移也卷进去，
+                // 点击箭头时卡片和滚动容器用两条曲线移动，产生粘滞感。
             }
         }
         .onHover { hoveringTrack = $0 }
@@ -2360,6 +2492,10 @@ private struct StashWorkspace: View {
             .allowsHitTesting(false)
     }
 
+    private func canPage(forward: Bool) -> Bool {
+        forward ? canPageForward : canPageBackward
+    }
+
     /// 边缘自动滚动的感应带。
     ///
     /// 做成透明的投放区而不是监听指针位置：拖拽期间 SwiftUI 不派发 hover，
@@ -2367,23 +2503,25 @@ private struct StashWorkspace: View {
     /// 投放——真正的落点判定仍然归卡片上的 `PinReorderDropDelegate`。
     @ViewBuilder
     private func edgeScroller(forward: Bool) -> some View {
-        // pager 和拖拽边缘感应层互斥：普通浏览只显示 pager；拖拽时 pager 不收
-        // 事件、边缘层才出现。旧实现两层叠在同一批像素上，顶层 drop strip
-        // 会截胡底下按钮 / 边界。
-        if model.outboundDrag != nil, trackScroll.canMove(forward: forward) {
+        // pager 和拖拽边缘感应带互斥：普通浏览只有 pager 收事件；拖拽时换成
+        // 边缘带。两层叠在同一批像素上时，顶层的 drop strip 会截胡底下的按钮。
+        if model.outboundDrag != nil, canPage(forward: forward) {
             Color.clear
                 .frame(width: forward ? 28 : 8)
                 .contentShape(Rectangle())
                 .onDrop(
                     of: [UTType.data],
-                    isTargeted: Binding(
-                        get: { false },
-                        set: { hovering in
-                            if hovering { startEdgeScroll(forward: forward) }
+                    delegate: GroupDetachDropDelegate(
+                        model: model,
+                        isDetaching: $isDetachingFromGroup,
+                        boundary: $boundaryHighlight,
+                        edgeScroll: { active in
+                            if active { startEdgeScroll(forward: forward) }
                             else { stopEdgeScroll() }
-                        }
+                        },
+                        edgeForward: forward
                     )
-                ) { _ in false }
+                )
         }
     }
 
@@ -2391,10 +2529,9 @@ private struct StashWorkspace: View {
         stopEdgeScroll()
         edgeScrollTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(220))
-            while !Task.isCancelled, model.outboundDrag != nil,
-                  trackScroll.canMove(forward: forward) {
-                page(forward: forward, fraction: 0.26, duration: 0.16)
-                try? await Task.sleep(for: .milliseconds(210))
+            while !Task.isCancelled, model.outboundDrag != nil {
+                guard page(forward: forward, fraction: 0.28, duration: 0.16) else { return }
+                try? await Task.sleep(for: .milliseconds(230))
             }
         }
     }
@@ -2406,9 +2543,14 @@ private struct StashWorkspace: View {
 
     @ViewBuilder
     private func pager(forward: Bool) -> some View {
-        if model.outboundDrag == nil, trackScroll.hasOverflow {
-            let enabled = trackScroll.canMove(forward: forward)
-            Button { page(forward: forward) } label: {
+        // 可见性只看"这个方向还有没有东西"。挂在 outboundDrag 上是错的：
+        // 拖拽身份万一没清（投放被拒、拖到应用外取消），箭头就再也不回来。
+        // 走不动就**不画**，而不是画一个暗掉的。
+        // 一个按不动的按钮摆在那儿，用户只会反复去点它。
+        if canPage(forward: forward) {
+            let dragging = model.outboundDrag != nil
+            let enabled = true
+            Button { _ = page(forward: forward) } label: {
                 Image(systemName: forward ? "chevron.right" : "chevron.left")
                     .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(enabled ? Style.secondary : Style.tertiary.opacity(0.35))
@@ -2419,47 +2561,46 @@ private struct StashWorkspace: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .disabled(!enabled)
-            // 看得见就能点。旧实现常显 38%，却用 hoveringTrack 才开 hit-testing：
-            // 第一次点击先让 hover 状态生效，第二次才真正按到按钮。
-            .allowsHitTesting(enabled)
-            .opacity(hoveringTrack ? 0.96 : 0.62)
+            .disabled(!enabled || dragging)
+            // 看得见就能点：旧实现常显却要等 hover 才开 hit-testing，
+            // 第一次点击先让 hover 生效、第二次才真按到按钮。
+            .allowsHitTesting(enabled && !dragging)
+            .opacity(dragging ? 0.28 : (hoveringTrack ? 0.96 : 0.62))
             .animation(.easeOut(duration: 0.14), value: hoveringTrack)
+            .animation(.easeOut(duration: 0.14), value: dragging)
             .help(forward ? "看后面的" : "看前面的")
         }
     }
 
-    /// 按真实像素移动一页。普通卡、折叠组、展开组、版本合集宽度都不同，
-    /// "三张卡 = 一页"从来不成立；用 viewport - 44 留一点上下文。
-    private func page(forward: Bool, fraction: CGFloat = 1, duration: Double = 0.24) {
-        let step = max(80, (trackScroll.viewport - 44) * fraction)
-        let delta = forward ? step : -step
-        let target = min(max(0, trackScroll.offset + delta), trackScroll.maxOffset)
-        guard abs(target - trackScroll.offset) > 1 else { return }
-        withAnimation(.smooth(duration: duration)) {
-            scrollPosition.scrollTo(x: target)
-        }
+    /// 按真实视口距离翻页。展开/折叠/普通卡都只是连续内容；控制器直接
+    /// 操作 NSClipView，不经过 SwiftUI 双向 ScrollPosition，不重建卡片树。
+    @discardableResult
+    private func page(forward: Bool, fraction: CGFloat = 1, duration: Double = 0.2) -> Bool {
+        scrollController.page(forward: forward, fraction: fraction, duration: duration)
     }
 
     /// 先让旧内容淡下去，再换页签，再让新内容浮上来。直接在 activeTab 的
-    /// onChange 里做淡入，会先闪出一帧新内容、再突然变暗，不是过渡。
+    /// onChange 里做淡入，会先闪出一帧新内容、再突然变暗，那不是过渡。
     ///
-    /// 90ms 出场 + 160ms 入场：足够让眼睛看见连续性，但比一次普通点击短，
-    /// 不会拖慢操作。Task latest-wins，快速连点只落到最后一页。
+    /// 90ms 出场 + 160ms 入场：够眼睛看见连续性，又比一次普通点击短。
+    /// Task latest-wins，快速连点只落到最后一页。
     private func selectTab(_ tab: AppModel.Tab) {
         guard tab != model.activeTab else { return }
         tabTransitionTask?.cancel()
         tabTransitionTask = Task { @MainActor in
             withAnimation(.easeOut(duration: 0.09)) { trackFade = 0.18 }
             try? await Task.sleep(for: .milliseconds(90))
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled else {
+                // 被下一次点击取消也要把亮度还回去，否则整条轨道永远停在 0.18。
+                withAnimation(.easeOut(duration: 0.12)) { trackFade = 1 }
+                return
+            }
             if tab == .privateSpace, !model.isPrivateSpaceUnlocked {
                 model.unlockPrivateSpace()
             }
             model.activeTab = tab
-            // 新布局在下一拍才真正生成。让它先布局，再做淡入，避免边算布局边动。
+            // 新布局下一拍才生成。先让它布好局，再淡入，避免边算布局边动。
             await Task.yield()
-            guard !Task.isCancelled else { return }
             withAnimation(.easeOut(duration: 0.16)) { trackFade = 1 }
             tabTransitionTask = nil
         }
@@ -2493,12 +2634,20 @@ private struct StashWorkspace: View {
                         .foregroundStyle(tabTint(tab))
                         .padding(.horizontal, 10)
                         .frame(height: 26)
-                        .background(tabBackground(tab), in: RoundedRectangle(cornerRadius: 6))
-                        .overlay {
-                            if privacyDropTargeted, tab == .privateSpace {
-                                RoundedRectangle(cornerRadius: 6)
-                                    .strokeBorder(Style.accent, lineWidth: 1.5)
-                            }
+                        .background {
+                            let targeted = privacyDropTargeted && tab == .privateSpace
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(targeted ? Style.accentMuted : tabBackground(tab))
+                                .overlay {
+                                    // 高亮**不改变尺寸**，只加一圈描边和底色。
+                                    //
+                                    // 之前用 scaleEffect(1.12) 把整个页签放大：
+                                    // 一行里的页签是紧挨着的，放大就会压到邻居身上，
+                                    // 上下也会顶出这一行被裁掉。一个"能放这儿"的
+                                    // 提示不该靠改变布局尺寸来表达。
+                                    RoundedRectangle(cornerRadius: 6)
+                                        .strokeBorder(Style.accent, lineWidth: targeted ? 1.5 : 0)
+                                }
                         }
                         .contentShape(Rectangle())
                     }
@@ -2511,8 +2660,7 @@ private struct StashWorkspace: View {
                         Task { await model.setPrivate(targets, isPrivate: true) }
                         return true
                     }
-                    .scaleEffect(privacyDropTargeted && tab == .privateSpace ? 1.12 : 1)
-                    .animation(.spring(response: 0.25, dampingFraction: 0.7), value: privacyDropTargeted)
+                    .animation(.easeOut(duration: 0.16), value: privacyDropTargeted)
                 }
             }
             .padding(.horizontal, 12)
@@ -2532,8 +2680,16 @@ private struct StashWorkspace: View {
     /// 图标的宽度，需要时再弹开。
     @ViewBuilder
     private var platformRow: some View {
-        let groups = model.availableLinkGroups
-        let folders = model.availableCardGroups
+        // 这行只有两种明确用途，不能混：
+        // - 「全部」只显示用户自己整理的手动分组；
+        // - 「链接」只显示平台 / 域名。
+        // 旧实现两份都无条件读取，所以链接页上会出现「剪贴板截图」「2027 校招」
+        // 这种分组胶囊；而这些组在链接页过滤后可能一张成员卡都没有，点进去
+        // 只剩空白——界面在承诺一个根本不存在的入口。
+        let groups: [AppModel.LinkGroup] = model.activeTab == .kind(.link)
+            ? model.availableLinkGroups : []
+        let folders: [CardGroup] = model.activeTab == .all
+            ? model.availableCardGroups : []
         return ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 4) {
                     // 手动分组排在最前：那是用户自己起的名字，比按平台自动
@@ -2950,7 +3106,11 @@ private struct PinCard: View {
             // 视觉上直接复用卡片已有的选中边框，不加任何新控件。
             .modifier(CommandClickSelection(model: model, itemID: item.id))
             .onTapGesture { model.copy(item) }
-            .onDrag { PinDragProvider.make(item: item, resolvedURL: resolvedURL, model: model) }
+            .onDrag {
+                PinDragProvider.make(item: item, resolvedURL: resolvedURL, model: model)
+            } preview: {
+                dragPreview
+            }
 
             if showsFooter {
             HStack(spacing: 5) {
@@ -3068,6 +3228,11 @@ private struct PinCard: View {
             if item.kind == .link || resolvedURL != nil {
                 Button("打开") { model.open(item) }
             }
+            if item.kind == .link {
+                // 抽取器改好之后，老卡片里存的还是当年那份失败结果。
+                // 给一个手动重来的入口，不必等自动补抓。
+                Button("重新解析链接") { model.reparseLink(item.id) }
+            }
             if item.origin == .clipboard {
                 // 一条动作，一个入口。
                 //
@@ -3161,6 +3326,29 @@ private struct PinCard: View {
         guard item.kind == .text, case .inline(let text) = item.holding else { return .media }
         if let signature = ClipboardTextSignature.detect(text) { return .code(signature) }
         return .prose
+    }
+
+    /// 拖拽时跟着指针的那一张。
+    ///
+    /// 不给显式预览的话，SwiftUI 会拿 `.onDrag` 所挂视图的快照——而它挂在
+    /// **内容区**上（点击和拖拽都收在那儿，才不会和底栏按钮抢同一次鼠标）。
+    /// 内容区外面才是卡面：圆角、底色、描边全在上一层。于是拖起来的是一块
+    /// 没有背景的图和字，看着就是"变透明了"。
+    private var dragPreview: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            content
+            Spacer(minLength: 0)
+        }
+        .padding(8)
+        .frame(width: Self.width, height: availableHeight, alignment: .topLeading)
+        .background(
+            Style.surface,
+            in: RoundedRectangle(cornerRadius: Style.cardRadius, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: Style.cardRadius, style: .continuous)
+                .strokeBorder(Style.strongStroke)
+        }
     }
 
     @ViewBuilder
@@ -3617,7 +3805,10 @@ private struct CardGroupAccordion: View {
     private var tint: Color { Style.cool }
     private var isExpanded: Bool { model.expandedCardGroups.contains(group.id) }
     /// 纸边错开多少。悬停时错得更开一点，像被手指拨了一下。
-    private var tile: (x: CGFloat, y: CGFloat) { hovering ? (9, 7) : Self.restTile }
+    /// 悬停时纸边错得更开。占位按最大那一档算，见 `collapsed` 的 frame：
+    /// 只有画出来的位置在动，这一格占多宽从头到尾不变。
+    private static let hoverTile: (x: CGFloat, y: CGFloat) = (9, 7)
+    private var tile: (x: CGFloat, y: CGFloat) { hovering ? Self.hoverTile : Self.restTile }
     /// **布局**用的那一份，永远是静止值。
     ///
     /// 让 frontHeight 跟着 hover 走会连锁：卡面高度变 → 缩略图边长变 →
@@ -3688,7 +3879,7 @@ private struct CardGroupAccordion: View {
                 .shadow(color: Color.black.opacity(0.32), radius: 6, x: 2, y: 2)
         }
         .frame(
-            width: PinCard.width + CGFloat(sheetDepths.count) * Self.restTile.x,
+            width: PinCard.width + CGFloat(sheetDepths.count) * Self.hoverTile.x,
             height: availableHeight,
             alignment: .topLeading
         )
@@ -3748,7 +3939,7 @@ private struct CardGroupAccordion: View {
 
     /// 最前面那张的高度：整摞外框减去后面几层往下错开的那一段。
     private var frontHeight: CGFloat {
-        availableHeight - CGFloat(sheetDepths.count) * Self.restTile.y
+        availableHeight - CGFloat(sheetDepths.count) * Self.hoverTile.y
     }
 
     /// 成员缩略图拼成的小格子。数量决定几宫格，最多四张。
@@ -3782,7 +3973,10 @@ private struct CardGroupAccordion: View {
     }
 
     private var expanded: some View {
-        HStack(spacing: 8) {
+        // 成员可能十几张；普通 HStack 会一次性构建全部 PinCard（缩略图、
+        // 平台解析、语义状态、手势任务一起启动）。放在横向 ScrollView 里必须
+        // 用 LazyHStack，只创建视口附近的成员。
+        LazyHStack(spacing: 8) {
             spine
             ForEach(members) { item in
                 GroupMemberCell(
@@ -4057,8 +4251,13 @@ private struct VersionAccordion: View {
             .shadow(color: Color.black.opacity(0.45), radius: 7, x: 3)
         }
         // 整摞的宽度 = 一张卡 + 探出来的那两条边，不会挤到隔壁。
+        //
+        // 宽度必须用**静止值**，不能用 peek：peek 随 hover 变，于是鼠标一碰
+        // 这一摞，它在 LazyHStack 里占的宽度就变了，右边所有卡片跟着平移——
+        // 用户什么都没做，只是把指针放上去，整条轨道抖一下。悬停只该让纸边
+        // 错得更开（那是 offset，不参与布局）。
         .frame(
-            width: PinCard.width + CGFloat(sheetDepths.count) * peek,
+            width: PinCard.width + CGFloat(sheetDepths.count) * Self.hoverTileX,
             height: availableHeight,
             alignment: .leading
         )
@@ -4079,7 +4278,12 @@ private struct VersionAccordion: View {
     }
 
     /// 探出来的宽度。悬停时多探一点，像被手指拨开一条缝。
-    private var peek: CGFloat { hovering ? 9 : Self.restTileX }
+    /// 悬停时纸边错得更开。**宽度按最大那一档预留**（见下面的 frame）：
+    /// 按静止值预留的话，悬停时纸边会探出自己那一格，压到隔壁卡片上——
+    /// 那就是"卡片重叠"。而反过来让宽度跟着 hover 变，则是整条轨道跟着抖。
+    /// 两个都不能要：占位固定取最大值，只有画出来的位置在动。
+    private static let hoverTileX: CGFloat = 9
+    private var peek: CGFloat { hovering ? Self.hoverTileX : Self.restTileX }
     /// 布局用的静止值，见下面外框那句注释。
     private static let restTileX: CGFloat = 7
 
@@ -4090,7 +4294,7 @@ private struct VersionAccordion: View {
     // MARK: 展开
 
     private var expanded: some View {
-        HStack(spacing: 8) {
+        LazyHStack(spacing: 8) {
             spine
             ForEach(Array(members.enumerated()), id: \.element.id) { index, item in
                 PinCard(

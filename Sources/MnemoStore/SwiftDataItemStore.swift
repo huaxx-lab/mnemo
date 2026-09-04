@@ -141,6 +141,29 @@ public actor SwiftDataItemStore: ItemStore {
         try modelContext.save()
     }
 
+    public func replaceChunks(
+        itemID: UUID, with chunks: [ContentChunk], updating item: Item
+    ) throws {
+        guard item.id == itemID, let storedItem = try stored(itemID) else { return }
+        let descriptor = FetchDescriptor<StoredContentChunk>(
+            predicate: #Predicate { $0.itemID == itemID }
+        )
+        do {
+            for old in try modelContext.fetch(descriptor) { modelContext.delete(old) }
+            for chunk in chunks where chunk.itemID == itemID {
+                modelContext.insert(StoredContentChunk(chunk))
+            }
+            storedItem.apply(item)
+            // 分块、聚合向量、索引时间和抓到的真实标题在一个事务里提交。
+            try modelContext.save()
+        } catch {
+            // SwiftData save 失败后 context 仍带着未提交的 delete/insert；不回滚，
+            // 下一次无关保存可能把这批半成品一起提交，破坏“失败保留旧 RAG”。
+            modelContext.rollback()
+            throw error
+        }
+    }
+
     public func deleteChunks(itemID: UUID) throws {
         let descriptor = FetchDescriptor<StoredContentChunk>(
             predicate: #Predicate { $0.itemID == itemID }

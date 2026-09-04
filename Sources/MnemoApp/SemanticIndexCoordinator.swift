@@ -44,7 +44,8 @@ enum SemanticIndexCoordinator {
     static func index(
         item: Item,
         library: Library,
-        settings: ProviderSettingsModel
+        settings: ProviderSettingsModel,
+        forceRefreshLink: Bool = false
     ) async -> IndexingRunResult {
         var chunks = await SemanticContentExtractor.extract(item: item, library: library)
         // 上一版分块。图片的画面描述是这条管线里最贵的一次调用（一张图连着
@@ -88,15 +89,14 @@ enum SemanticIndexCoordinator {
         // 在这之前链接条目的"内容"就是那串 URL 本身，所以自然语言永远搜不到
         // 链接里讲了什么。抓回来之后它和截图走完全相同的下游——分块、
         // Embedding、问答，一条路。
+        var fetchedPageTitle: String?
         if item.kind == .link, !Task.isCancelled,
-           case .inline(let value) = item.holding {
+           case .inline = item.holding {
             let previousPage = previousChunks
                 .filter { $0.source == .linkPage }
                 .sorted { $0.ordinal < $1.ordinal }
-            if !previousPage.isEmpty {
-                // 抓过就不再抓。网页正文不会因为我们重建索引而变化，而每次
-                // 重抓都是一次对第三方站点的真实请求——没配 embedding 时
-                // 队列会反复把这些条目捡回来，那就是反复骚扰别人的服务器。
+            if !forceRefreshLink, !previousPage.isEmpty {
+                // 正常重建时沿用网页正文，避免每次改标签都重新请求第三方站点。
                 for page in previousPage {
                     chunks.append(ContentChunk(
                         itemID: item.id,
@@ -105,16 +105,39 @@ enum SemanticIndexCoordinator {
                         text: page.text
                     ))
                 }
-            } else if let url = item.linkURL,
-                      LinkContentFetcher.isFetchable(url),
-                      let fetched = await LinkContentFetcher.fetch(url) {
-                let pageChunks = SemanticContentExtractor.chunks(
+            } else if let url = item.linkURL, LinkContentFetcher.isFetchable(url) {
+                guard let fetched = await LinkContentFetcher.fetch(url) else {
+                    // 强制刷新失败时保留旧 RAG，绝不能先删旧内容再返回失败。
+                    return IndexingRunResult(
+                        completed: false,
+                        dimensionChanged: false,
+                        waitingForEmbedding: false
+                    )
+                }
+                fetchedPageTitle = fetched.title
+                // 有天然分段就按段切（论坛一层楼一块），否则按字数切。
+                let pageChunks = fetched.segments.map { segments in
+                    SemanticContentExtractor.chunks(
+                        itemID: item.id,
+                        segments: segments,
+                        source: .linkPage,
+                        pageNumber: nil,
+                        ordinalBase: chunks.count
+                    )
+                } ?? SemanticContentExtractor.chunks(
                     itemID: item.id,
                     text: fetched.text,
                     source: .linkPage,
                     pageNumber: nil,
                     ordinalBase: chunks.count
                 )
+                guard !pageChunks.isEmpty else {
+                    return IndexingRunResult(
+                        completed: false,
+                        dimensionChanged: false,
+                        waitingForEmbedding: false
+                    )
+                }
                 chunks.append(contentsOf: pageChunks)
             }
         }
@@ -230,19 +253,33 @@ enum SemanticIndexCoordinator {
         }
 
         do {
-            try await library.replaceChunks(for: item.id, with: chunks)
+            // `item` 可能在抓网页的几秒里被元数据任务更新过。重新读当前版本，
+            // 只把本轮索引负责的字段合并进去，避免用旧快照覆盖新标题/标签。
+            var updated = (try? await library.item(id: item.id)) ?? item
+            // 正文抓取和标题来自**同一个 HTTP 响应**，必须同一次落库。过去标题
+            // 依赖另一条 LPMetadataProvider 任务：正文进 RAG 了，卡片却仍叫
+            // “无法访问链接内容”。只有临时本地标题能被自动替换；用户手写标题
+            // (`titledLocally == false`) 永远保留。
+            if (updated.titledLocally
+                    || LinkTextExtraction.isFailurePlaceholderTitle(updated.title)),
+               let title = fetchedPageTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !title.isEmpty, title != updated.title {
+                updated.title = String(title.prefix(80))
+                // 网页自己给出的标题已经不是“本地凑出来的临时名”。后续普通
+                // 元数据补抓不再反复覆盖它；用户手写标题同样一直受保护。
+                updated.titledLocally = false
+            }
+
             if let modelID,
                let aggregate = averageVector(chunks.compactMap(\.vector)) {
-                var updated = item
                 updated.vector = aggregate
                 updated.contentHash = chunks.map(\.contentHash).joined(separator: ":")
                 updated.embeddingModelID = modelID
                 updated.indexedAt = indexedAt
-                try await library.update(updated)
+                updated.aiPrivacyBlocked = false
             } else if privacyBlocked || embeddingUnconfigured {
                 // 新内容不能外发时，旧向量也不能继续代表当前内容；保留本地
                 // 全文/OCR 分块供关键词检索，并记录已处理的内容版本。
-                var updated = item
                 updated.vector = nil
                 updated.contentHash = chunks.map(\.contentHash).joined(separator: ":")
                 updated.embeddingModelID = nil
@@ -250,8 +287,10 @@ enum SemanticIndexCoordinator {
                 // embedding，队列会凭它把这些条目重新捡回来。
                 updated.indexedAt = nil
                 updated.aiPrivacyBlocked = privacyBlocked
-                try await library.update(updated)
             }
+            // 分块与承载聚合向量/标题的 Item 必须同一个事务提交。
+            // 即使本轮只重写分块，当前 Item 也一起提交，确保不会出现新正文配旧向量。
+            try await library.replaceChunks(for: item.id, with: chunks, updating: updated)
         } catch {
             return IndexingRunResult(
                 completed: false,

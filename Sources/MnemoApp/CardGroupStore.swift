@@ -28,13 +28,20 @@ struct CardGroup: Identifiable, Codable, Equatable, Sendable {
 @MainActor
 enum CardGroupStore {
     private static let key = "Pinland.cardGroups.v1"
+    private static let backup1Key = "Pinland.cardGroups.backup1.v1"
+    private static let backup2Key = "Pinland.cardGroups.backup2.v1"
 
     private static var groups: [CardGroup] = {
-        guard let data = UserDefaults.standard.data(forKey: key),
-              let decoded = try? JSONDecoder().decode([CardGroup].self, from: data) else {
-            return []
+        let defaults = UserDefaults.standard
+        // 主表损坏时自动退到最近一代备份；正常的空数组是合法值，不回滚。
+        for key in [key, backup1Key, backup2Key] {
+            guard let data = defaults.data(forKey: key),
+                  let decoded = try? JSONDecoder().decode([CardGroup].self, from: data) else {
+                continue
+            }
+            return decoded
         }
-        return decoded
+        return []
     }()
 
     static func all() -> [CardGroup] { groups }
@@ -87,6 +94,35 @@ enum CardGroupStore {
         persist()
     }
 
+    /// 撤销删除时恢复成员关系。`snapshot` 是删除前那一组的完整顺序；只恢复
+    /// 当前仍活着的成员，避免把期间真正删除的条目重新写成幽灵引用。
+    static func restoreMembership(
+        _ itemID: UUID, from snapshot: CardGroup, keeping alive: Set<UUID>
+    ) {
+        // 一张卡只能属于一个组；只改内存一次，最后统一 persist，避免备份被
+        // 一个操作的中间态连续覆盖。
+        for index in groups.indices.reversed() {
+            groups[index].itemIDs.removeAll { $0 == itemID }
+            if groups[index].itemIDs.count < 2 { groups.remove(at: index) }
+        }
+
+        let wanted = snapshot.itemIDs.filter { alive.contains($0) }
+        guard wanted.contains(itemID), wanted.count >= 2 else {
+            persist()
+            return
+        }
+        if let index = groups.firstIndex(where: { $0.id == snapshot.id }) {
+            let current = groups[index].itemIDs.filter { alive.contains($0) }
+            let currentSet = Set(current)
+            var order = wanted.filter { currentSet.contains($0) || $0 == itemID }
+            order.append(contentsOf: current.filter { !order.contains($0) })
+            groups[index].itemIDs = order
+        } else {
+            groups.append(CardGroup(id: snapshot.id, name: snapshot.name, itemIDs: wanted))
+        }
+        persist()
+    }
+
     static func rename(_ groupID: UUID, to name: String) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
@@ -104,6 +140,19 @@ enum CardGroupStore {
     /// 条目消失（删除、清空回收站）之后把悬空的成员清掉。
     @discardableResult
     static func prune(keeping ids: Set<UUID>) -> Bool {
+        // 永不清空到零——这是最后的安全闸。
+        //
+        // 一次调用把整个分组表清空只可能意味着一件事：传入的 `ids` 是错的
+        // （比如调用点拿到的条目列表是空的，而调用点自己不知道）。这种时候
+        // 绝不能顺着错的输入把用户归好的类全删掉——宁可这次不修，等拿到
+        // 真的存活列表再修。一整组全是幽灵成员可以由解散/手动清理来处理，
+        // 而不是这里替用户决定全部消失。
+        guard !groups.isEmpty else { return false }
+        let wouldClearAll = groups.allSatisfy { group in
+            group.itemIDs.contains { ids.contains($0) } == false
+        }
+        if wouldClearAll { return false }
+
         var changed = false
         for index in groups.indices.reversed() {
             let kept = groups[index].itemIDs.filter { ids.contains($0) }
@@ -121,6 +170,16 @@ enum CardGroupStore {
 
     private static func persist() {
         guard let data = try? JSONEncoder().encode(groups) else { return }
-        UserDefaults.standard.set(data, forKey: key)
+        let defaults = UserDefaults.standard
+        guard defaults.data(forKey: key) != data else { return }
+        // 每次覆盖前保留两代。merge 内部可能有两个写入步骤，两代正好能留住
+        // 操作开始前的完整状态；即使将来再出现错误修剪，也不再不可恢复。
+        if let previousBackup = defaults.data(forKey: backup1Key) {
+            defaults.set(previousBackup, forKey: backup2Key)
+        }
+        if let current = defaults.data(forKey: key) {
+            defaults.set(current, forKey: backup1Key)
+        }
+        defaults.set(data, forKey: key)
     }
 }

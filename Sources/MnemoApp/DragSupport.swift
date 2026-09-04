@@ -265,14 +265,26 @@ final class NotchDragReceiverView: NSView {
 
     override func hitTest(_ point: NSPoint) -> NSView? { bounds.contains(point) ? self : nil }
 
+    /// 这次拖拽是从 Mnemo 自己的卡片上起来的。
+    ///
+    /// 内部拖拽落回刘海什么也不会发生（见 `performDragOperation`：只是回到
+    /// 原位，绝不再复制一条）。既然如此就不能报 `.copy`——那是在向系统承诺
+    /// 一个"会新增一份"的操作，光标上于是挂着绿色 ➕。用户把卡片往外拖，只要
+    /// 还有一角压着刘海，➕ 就亮着，等于提示"松手会多出一条"，而事实相反。
+    private func isInternalDrag(_ pasteboard: NSPasteboard) -> Bool {
+        pasteboard.availableType(from: [Self.internalPinType]) != nil
+    }
+
     override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
-        guard accepts(sender.draggingPasteboard) else { return [] }
+        guard !isInternalDrag(sender.draggingPasteboard),
+              accepts(sender.draggingPasteboard) else { return [] }
         model.setDropTargeted(true, payloadKind: payloadKind(sender.draggingPasteboard))
         return .copy
     }
 
     override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
-        guard accepts(sender.draggingPasteboard) else { return [] }
+        guard !isInternalDrag(sender.draggingPasteboard),
+              accepts(sender.draggingPasteboard) else { return [] }
         model.setDropTargeted(true, payloadKind: payloadKind(sender.draggingPasteboard))
         return .copy
     }

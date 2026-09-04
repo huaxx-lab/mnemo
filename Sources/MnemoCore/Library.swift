@@ -270,6 +270,24 @@ public actor Library {
         try await store.replaceChunks(itemID: itemID, with: chunks)
     }
 
+    /// 原子替换分块与 Item 的索引状态，并沿用 `update` 的同步元数据规则。
+    public func replaceChunks(
+        for itemID: UUID, with chunks: [ContentChunk], updating item: Item
+    ) async throws {
+        guard item.id == itemID else { return }
+        let previous = try await store.item(id: itemID)
+        var changed = item
+        let syncChanged = previous.map { !$0.hasSameSyncedContent(as: item) } ?? true
+        if let previous {
+            changed.modifiedAt = syncChanged ? .now : previous.modifiedAt
+            changed.cloudSystemFields = previous.cloudSystemFields
+        } else {
+            changed.modifiedAt = .now
+        }
+        try await store.replaceChunks(itemID: itemID, with: chunks, updating: changed)
+        if syncChanged { await notify(.upsertItem(itemID)) }
+    }
+
     public func reconcileVault() async throws -> ReconcileReport {
         try await vault.reconcile()
     }

@@ -51,10 +51,25 @@ public enum LinkTextExtraction {
     public struct Extracted: Sendable, Equatable {
         public var title: String?
         public var text: String
+        /// 页面自报的摘要（`og:description` / `meta[name=description]`）。
+        ///
+        /// 对前端渲染的站点这经常是**唯一**能匿名拿到的正文。实测小红书的
+        /// 笔记全文就写在这里，而 DOM 里一个字都没有——不读它，这类链接
+        /// 永远停在"无法获取内容"。
+        public var summary: String?
+        /// 内容天然的分段（论坛的一层楼、一条评论）。
+        ///
+        /// 有了它，切块就能按**语义边界**走而不是按字数：一层楼一块，检索命中
+        /// 时指向的是具体某个人说的某句话，而不是横跨两条不相干回复的片段。
+        public var segments: [String]?
 
-        public init(title: String?, text: String) {
+        public init(
+            title: String?, text: String, summary: String? = nil, segments: [String]? = nil
+        ) {
             self.title = title
             self.text = text
+            self.summary = summary
+            self.segments = segments
         }
 
         public var isEmpty: Bool { text.isEmpty }
@@ -96,6 +111,8 @@ public enum LinkTextExtraction {
         let rawTitle = (try? document.title())?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let title = rawTitle?.isEmpty == false ? rawTitle : nil
+        // 摘要要在删噪音之前取：head 里的 meta 不该受正文选择器影响。
+        let summary = metaSummary(document)
 
         for selector in noiseSelectors {
             try? document.select(selector).remove()
@@ -110,7 +127,7 @@ public enum LinkTextExtraction {
             break
         }
         guard let root = chosen ?? document.body() else {
-            return Extracted(title: title, text: "")
+            return Extracted(title: title, text: "", summary: summary)
         }
 
         if let elements = try? root.select(blockSelectors) {
@@ -120,7 +137,44 @@ public enum LinkTextExtraction {
         }
 
         let raw = (try? root.text(trimAndNormaliseWhitespace: false)) ?? ""
-        return Extracted(title: title, text: clamp(normalize(raw)))
+        return Extracted(title: title, text: clamp(normalize(raw)), summary: summary)
+    }
+
+    /// 页面自报的配图地址。相对地址按页面地址补全。
+    public static func metaImageURL(html: String, baseURL: URL?) -> URL? {
+        guard let document = try? SwiftSoup.parse(html, baseURL?.absoluteString ?? "") else {
+            return nil
+        }
+        for query in ["meta[property=og:image]", "meta[name=twitter:image]", "meta[itemprop=image]"] {
+            guard let element = try? document.select(query).first(),
+                  let raw = try? element.attr("content") else { continue }
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            if let absolute = URL(string: trimmed), absolute.scheme != nil { return absolute }
+            if let base = baseURL, let relative = URL(string: trimmed, relativeTo: base) {
+                return relative.absoluteURL
+            }
+        }
+        return nil
+    }
+
+    /// 页面自报的摘要。`og:description` 优先——它是给分享卡片准备的，通常比
+    /// SEO 用的 `description` 更贴近正文。
+    private static let summaryQueries = [
+        "meta[property=og:description]",
+        "meta[name=description]",
+        "meta[name=twitter:description]",
+    ]
+
+    static func metaSummary(_ document: Document) -> String? {
+        for query in summaryQueries {
+            guard let element = try? document.select(query).first(),
+                  let content = try? element.attr("content") else { continue }
+            let text = content.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { continue }
+            return normalize(text)
+        }
+        return nil
     }
 
     /// 压掉连续空白与空行。
@@ -135,6 +189,19 @@ public enum LinkTextExtraction {
             .replacingOccurrences(of: #"\n[ \t]*"#, with: "\n", options: .regularExpression)
             .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 旧抓取失败时误存成卡片标题的状态文案。无论 `titledLocally` 历史值
+    /// 是什么，它们都不是用户标题，抓到真实网页标题后必须允许替换。
+    public static func isFailurePlaceholderTitle(_ title: String) -> Bool {
+        let value = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return [
+            "无法访问链接内容",
+            "无法访问该链接内容",
+            "无法获取内容",
+            "Loading...",
+            "Loading…",
+        ].contains(value)
     }
 
     public static func clamp(_ text: String) -> String {

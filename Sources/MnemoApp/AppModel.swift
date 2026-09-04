@@ -121,6 +121,8 @@ final class AppModel {
     private static let modeKey = "Pinland.mode"
     private static let focusDurationKey = "Pinland.focusDurationMinutes"
     private static let indexQueueKey = "Pinland.pendingIndexIDs"
+    private static let forcedLinkRefreshKey = "Pinland.forcedLinkRefreshIDs"
+    private static let knownInvalidLinkPageKey = "Pinland.knownInvalidLinkPageIDs"
     private static let aiQueueKey = "Pinland.pendingAIIDs"
     private static let sceneCacheKey = "Pinland.sceneRecommendationCache.v1"
     private static let edgeStatusEffectsKey = "Pinland.edgeStatusEffectsEnabled"
@@ -168,6 +170,7 @@ final class AppModel {
             // 不是"这次开机剩下的时间"——切到全部再切回来还能直接进去的话，
             // 那把锁只挡住了第一次。
             if oldValue == .privateSpace, isPrivateSpaceUnlocked { lockPrivateSpace() }
+            clearCardGroupSelectionLeavingAllTab()
             requestScrollToFirstCard()
         }
     }
@@ -707,6 +710,8 @@ final class AppModel {
     @ObservationIgnored private var undoDismissTask: Task<Void, Never>?
     private(set) var recentlyTrashedID: UUID?
     private(set) var recentlyTrashedTitle: String?
+    /// 删除前的分组快照；撤销时把成员关系和原顺序一起恢复。
+    @ObservationIgnored private var recentlyTrashedGroup: CardGroup?
     private(set) var isProcessingArchive = false
 
     let library: Library
@@ -720,7 +725,9 @@ final class AppModel {
     @ObservationIgnored var sceneRecommendationRouteFingerprintAction: (() -> String?)?
     @ObservationIgnored var contextRouteFingerprintAction: (() -> String?)?
     @ObservationIgnored var aiTransformAction: ((Item, SceneActionID) async -> String?)?
-    @ObservationIgnored var contentIndexAction: ((Item) async -> IndexingRunResult)?
+    @ObservationIgnored var contentIndexAction: (
+        (Item, Bool) async -> IndexingRunResult
+    )?
     @ObservationIgnored var semanticSearchAction: ((String, [Item], Bool) async -> SemanticSearchRun)?
     @ObservationIgnored var searchAnswerStreamAction: (
         (String, [RetrievalRankingCandidate], RecencyPreference?)
@@ -739,6 +746,15 @@ final class AppModel {
     @ObservationIgnored private var pdfQuestionTask: Task<Void, Never>?
     @ObservationIgnored private var sceneRecommendationCache: [UUID: SceneCacheEntry] = [:]
     private var pendingIndexIDs: [UUID] = []
+    /// 手动重新解析中的链接。只决定是否忽略旧 linkPage 缓存；直到新正文、向量、
+    /// 标题原子落库成功才移除，失败会保留旧 RAG 并继续留在队列。
+    private var forcedLinkRefreshIDs: Set<UUID> = []
+    /// 仅用于把手动重解析的最终结果反馈给用户；不持久化，应用退出后仍由
+    /// forcedLinkRefreshIDs + pendingIndexIDs 保证任务不丢。
+    @ObservationIgnored private var manualLinkRefreshIDs: Set<UUID> = []
+    /// 已确认旧 linkPage 是小红书登录墙。刷新失败时不能继续保留它污染 RAG；
+    /// 与 forced 集合同样持久化，崩溃重启后仍能完成清理。
+    private var knownInvalidLinkPageIDs: Set<UUID> = []
     private var pendingAIIDs: [UUID] = []
     /// 模型已经真的回答过的条目。
     ///
@@ -812,6 +828,19 @@ final class AppModel {
         library = Library(store: store, vault: vault)
         pendingIndexIDs = defaults.stringArray(forKey: Self.indexQueueKey)?
             .compactMap(UUID.init(uuidString:)) ?? []
+        forcedLinkRefreshIDs = Set(
+            (defaults.stringArray(forKey: Self.forcedLinkRefreshKey) ?? [])
+                .compactMap(UUID.init(uuidString:))
+        )
+        knownInvalidLinkPageIDs = Set(
+            (defaults.stringArray(forKey: Self.knownInvalidLinkPageKey) ?? [])
+                .compactMap(UUID.init(uuidString:))
+        )
+        // 两份 defaults 不是事务写入：应用恰好在两次 set 之间退出时，可能只剩
+        // force 标记没有队列项。启动时取并集，保证强制刷新不会永久搁浅。
+        for id in forcedLinkRefreshIDs where !pendingIndexIDs.contains(id) {
+            pendingIndexIDs.insert(id, at: 0)
+        }
         pendingAIIDs = defaults.stringArray(forKey: Self.aiQueueKey)?
             .compactMap(UUID.init(uuidString:)) ?? []
         if let saved = defaults.stringArray(forKey: Self.processableTemporaryIDsKey) {
@@ -1049,7 +1078,7 @@ final class AppModel {
         var isExpanded: Bool
     }
 
-    private struct VersionSnapshotKey: Equatable {
+    struct VersionSnapshotKey: Equatable {
         var visible: VisibleItemsKey
         var documentTitleGeneration: Int
         var expanded: [UUID]
@@ -1064,12 +1093,16 @@ final class AppModel {
 
     @ObservationIgnored private var versionSnapshotCache: VersionSnapshot?
 
-    private var versionSnapshot: VersionSnapshot {
-        let key = VersionSnapshotKey(
+    var versionSnapshotKey: VersionSnapshotKey {
+        VersionSnapshotKey(
             visible: visibleItemsKey,
             documentTitleGeneration: documentTitleGeneration,
             expanded: expandedVersionGroups.sorted { $0.uuidString < $1.uuidString }
         )
+    }
+
+    private var versionSnapshot: VersionSnapshot {
+        let key = versionSnapshotKey
         if let cache = versionSnapshotCache, cache.key == key { return cache }
 
         let documents = visibleItems
@@ -1139,6 +1172,68 @@ final class AppModel {
         showTransientFeedback("已钉到最前")
     }
 
+    /// 一个组是不是钉住的。
+    ///
+    /// 不变量：**一个组要么整组钉住，要么整组不钉，永远没有一半**。半钉的话
+    /// 成员会被钉住区排到队首、其余留在原处，同一个组被撕成两段画在轨道两头，
+    /// 而"取消钉住"又只对其中几张生效。
+    func isGroupPinned(_ groupID: UUID) -> Bool {
+        guard let group = cardGroupByID(groupID), !group.itemIDs.isEmpty else { return false }
+        return group.itemIDs.allSatisfy { PinnedLaneStore.contains($0) }
+    }
+
+    /// 把一整个组钉到前面。成员按组内顺序连续排在钉住区里。
+    func pinGroup(_ groupID: UUID, anchor target: UUID? = nil, after: Bool = false) {
+        guard let group = cardGroupByID(groupID) else { return }
+        let members = group.itemIDs.filter { id in items.contains(where: { $0.id == id }) }
+        guard !members.isEmpty else { return }
+        var cursor = target
+        var insertAfter = after
+        for id in members {
+            PinnedLaneStore.pin(id, anchor: cursor, after: insertAfter)
+            cursor = id
+            insertAfter = true
+        }
+        pinnedLaneGeneration &+= 1
+        showTransientFeedback("已把「\(group.name)」钉到最前")
+    }
+
+    func unpinGroup(_ groupID: UUID) {
+        guard let group = cardGroupByID(groupID) else { return }
+        var changed = false
+        for id in group.itemIDs where PinnedLaneStore.contains(id) {
+            PinnedLaneStore.unpin(id)
+            changed = true
+        }
+        guard changed else { return }
+        pinnedLaneGeneration &+= 1
+        showTransientFeedback("已取消钉住")
+    }
+
+    /// 把一个组的钉住状态重新拉平到"全钉"或"全不钉"。合并进新成员之后要调用，
+    /// 否则新成员会让整组变成半钉。
+    private func normalizeGroupPinning(_ groupID: UUID, pinned: Bool) {
+        guard let group = cardGroupByID(groupID) else { return }
+        var changed = false
+        if pinned {
+            var cursor: UUID? = group.itemIDs.first.flatMap {
+                PinnedLaneStore.contains($0) ? $0 : nil
+            }
+            for id in group.itemIDs {
+                guard !PinnedLaneStore.contains(id) else { cursor = id; continue }
+                PinnedLaneStore.pin(id, anchor: cursor, after: true)
+                cursor = id
+                changed = true
+            }
+        } else {
+            for id in group.itemIDs where PinnedLaneStore.contains(id) {
+                PinnedLaneStore.unpin(id)
+                changed = true
+            }
+        }
+        if changed { pinnedLaneGeneration &+= 1 }
+    }
+
     func unpinFromFront(_ id: UUID) {
         guard PinnedLaneStore.contains(id) else { return }
         PinnedLaneStore.unpin(id)
@@ -1154,6 +1249,22 @@ final class AppModel {
     func moveGroup(_ groupID: UUID, anchor target: UUID, after: Bool) {
         guard let group = cardGroups.first(where: { $0.id == groupID }),
               !group.itemIDs.contains(target) else { return }
+
+        // 组和卡片走同一套跨区规则：落点在钉住区就进钉住区，落点在普通区就
+        // 离开钉住区。之前 moveGroup 只重排 `items`、完全不碰钉住区——把组拖到
+        // 前面松手，下一帧钉住区又按自己的顺序把那些卡排回去，组就"弹回来了"。
+        let targetPinned = isPinnedToFront(target)
+        let groupPinned = isGroupPinned(groupID)
+        if targetPinned {
+            if groupPinned {
+                movePinnedGroup(groupID, anchor: target, after: after)
+            } else {
+                pinGroup(groupID, anchor: target, after: after)
+            }
+            return
+        }
+        if groupPinned { unpinGroup(groupID) }
+
         // 落点若在另一个组里，整摞要跨过那一组，不能停在它中间——否则两组的
         // 卡片交错，各自都不再是连续的一段。
         var target = target
@@ -1216,10 +1327,24 @@ final class AppModel {
         // 插到分组以外的位置，就是把它从组里拿出来了——用户看到的是它落在
         // 别处，那它就该真的在别处。留在组里的话下一帧它会跳回组里，
         // 看着像"拖了个寂寞"。
-        if let group = cardGroup(of: dragged), !group.itemIDs.contains(target) {
+        if activeTab == .all,
+           let group = cardGroup(of: dragged), !group.itemIDs.contains(target) {
             detachFromGroup(dragged)
         }
         moveItem(dragged, anchor: target, after: after)
+    }
+
+    /// 钉住区内部：整组换位。成员保持连续。
+    func movePinnedGroup(_ groupID: UUID, anchor target: UUID, after: Bool) {
+        guard let group = cardGroupByID(groupID), !group.itemIDs.contains(target) else { return }
+        var cursor: UUID? = target
+        var insertAfter = after
+        for id in group.itemIDs where PinnedLaneStore.contains(id) {
+            PinnedLaneStore.move(id, before: cursor, after: insertAfter)
+            cursor = id
+            insertAfter = true
+        }
+        pinnedLaneGeneration &+= 1
     }
 
     /// 钉住区内部换位。
@@ -1243,6 +1368,13 @@ final class AppModel {
             if activeCardGroup != nil { activeLinkGroup = nil }
         }
     }
+    /// 分组筛选只在「全部」有意义。离开全部时把选中的分组清掉，否则它会变成
+    /// 一个用户看不见的过滤器——轨道理应显示那一页签的内容，却只剩分组里的。
+    private func clearCardGroupSelectionLeavingAllTab() {
+        guard activeTab != .all, activeCardGroup != nil else { return }
+        activeCardGroup = nil
+    }
+
     /// 刚建好、等着起名字的那一组。界面据此弹出命名框。
     var groupAwaitingName: UUID?
 
@@ -1274,8 +1406,15 @@ final class AppModel {
     var availableCardGroups: [CardGroup] { filterRow().folders }
 
     private var computedCardGroups: [CardGroup] {
-        let visible = Set(visibleItemsIgnoringGroupFilter.map(\.id))
-        return cardGroups.filter { group in group.itemIDs.contains { visible.contains($0) } }
+        // 顶部胶囊属于「全部」页，所以数字必须等于全部页真正能看到的活跃成员：
+        // 回收站和隐私成员不计数。少于两张就不显示这个分组入口——一张卡不是组，
+        // 更不能显示「3」点进去却只看到一张。
+        let visible = Set(items.lazy.filter { !$0.isPrivate }.map(\.id))
+        return cardGroups.compactMap { group in
+            let members = group.itemIDs.filter { visible.contains($0) }
+            guard members.count >= 2 else { return nil }
+            return CardGroup(id: group.id, name: group.name, itemIDs: members)
+        }
     }
 
     /// 条目 → 它所在的组。
@@ -1330,14 +1469,15 @@ final class AppModel {
         // （`pinToFront` 会先出组），合并这一侧没做——结果是一张卡同时在
         // 钉住区和分组里：整组被钉住区排到队首、拖不动（拖完立刻被重排回去），
         // 而"移出分组"又只解开组不解开钉住，剩不下任何能取消钉住的手势。
-        for id in [dragged, target] where isPinnedToFront(id) {
-            PinnedLaneStore.unpin(id)
-            pinnedLaneGeneration &+= 1
-        }
+        // 目标组本来就整组钉着，就把新成员一起钉进去；否则整组落回普通区。
+        // 关键是别留下"半钉"——那会把一个组撕成两段画在轨道两头。
+        let targetGroupPinned = CardGroupStore.group(containing: target)
+            .map { isGroupPinned($0.id) } ?? isPinnedToFront(target)
         let existing = CardGroupStore.group(containing: target)
         let created = CardGroupStore.merge(dragged, into: target, defaultName: defaultGroupName())
         cardGroupGeneration &+= 1
         guard let created else { return }
+        normalizeGroupPinning(created, pinned: targetGroupPinned)
         normalizeGroupMembers(created, around: target)
         // 不自动展开：合并之后用户多半还要接着拖第三张、第四张，展开的组占
         // 整条轨道，反而把要拖的那些挤出了视野。想看里面点一下就是。
@@ -1426,6 +1566,13 @@ final class AppModel {
     /// 内容会走到这里，随手复制的临时内容不会——那些多数是过路的，
     /// 为它们每条都问一次模型既费钱又吵。
     func considerAutoGrouping(_ itemID: UUID) async {
+        // 归组会把几张卡折成一摞——轨道当场变短。用户正拖着、或者指针就压在
+        // 轨道上时做这件事，看到的是"卡片自己消失了、剩下的全错位"。排进队列，
+        // 等手离开再补。
+        guard !deferStructuralChanges else {
+            if !pendingAutoGroupIDs.contains(itemID) { pendingAutoGroupIDs.append(itemID) }
+            return
+        }
         guard autoGroupingEnabled,
               isFeatureUnlocked(.ai),
               let action = groupAssignmentAction,
@@ -1460,6 +1607,57 @@ final class AppModel {
         guard cardGroup(of: itemID)?.id == cardGroup(of: targetID)?.id else { return }
         CardGroupStore.moveMember(itemID, before: targetID, after: after)
         cardGroupGeneration &+= 1
+    }
+
+    /// 把卡片放到轨道空白处意味着什么：在组里就是拿出来，钉着就是松开钉子，
+    /// 其余情况什么都不做。
+    ///
+    /// 判定和执行都收在模型里。之前这段逻辑只写在轨道背景那一层，边缘翻页
+    /// 感应带压在它上面又只会 `return false`——靠边松手的投放既没落位、也没
+    /// 人接手，卡片直接弹回原处。同一个动作必须只有一份解释。
+    enum LeaveZoneIntent: Equatable {
+        case none
+        case detachGroup(UUID)
+        case unpin(UUID)
+        case unpinGroup(UUID)
+    }
+
+    func leaveZoneIntent() -> LeaveZoneIntent {
+        switch outboundDrag {
+        case .group(let groupID):
+            // 组落到空白处绝不拆成员；唯一有意义的结果是"离开钉住区"。
+            return isGroupPinned(groupID) ? .unpinGroup(groupID) : .none
+        case .item(let id):
+            // 分类页里的组成员只是普通卡投影，放到空白处不应改变「全部」页的
+            // 组织关系。只有全部页才有“拖出组”这层语义。
+            if activeTab == .all, cardGroup(of: id) != nil { return .detachGroup(id) }
+            if isPinnedToFront(id) { return .unpin(id) }
+            return .none
+        case nil:
+            return .none
+        }
+    }
+
+    @discardableResult
+    func applyLeaveZoneDrop() -> Bool {
+        let action = leaveZoneIntent()
+        guard action != .none else { return false }
+        completeOutboundDrop()
+        switch action {
+        case .none:
+            return false
+        case .detachGroup(let id):
+            // 从一个**钉住的**组里拖出来，就是整个离开前区：只解开组不解开
+            // 钉子的话，它会变成一张孤零零钉在前面的卡，而用户的动作分明是
+            // "把它拿出来"。
+            if isPinnedToFront(id) { unpinFromFront(id) }
+            detachFromGroup(id)
+        case .unpin(let id):
+            unpinFromFront(id)
+        case .unpinGroup(let id):
+            unpinGroup(id)
+        }
+        return true
     }
 
     func detachFromGroup(_ itemID: UUID) {
@@ -1542,7 +1740,24 @@ final class AppModel {
 
     /// 折叠不改变 `visibleItems`——搜索、拖拽排序、隐私过滤全都还在整份列表上
     /// 工作，这里只决定"这一刻怎么画"。
+    /// 轨道顺序 / 条目集合的变化令牌。给 `.animation(value:)` 用。
+    ///
+    /// 不拿 `entries.map(\.id)` 当触发值——那要求先算出 entries，而这条路径
+    /// 每一次滚动、每一次悬停都在跑。这些代次本来就是 displayEntries 的全部
+    /// 输入，比较几个 Int 是常数时间。
+    var trackOrderToken: VersionSnapshotKey { versionSnapshotKey }
+
+    @ObservationIgnored private var displayEntriesCache: (key: VersionSnapshotKey, value: [DisplayEntry])?
+
     var displayEntries: [DisplayEntry] {
+        let key = versionSnapshotKey
+        if let cache = displayEntriesCache, cache.key == key { return cache.value }
+        let value = computedDisplayEntries
+        displayEntriesCache = (key, value)
+        return value
+    }
+
+    private var computedDisplayEntries: [DisplayEntry] {
         // visibleItems 自己就要过滤 + 排序一遍，取一次存下来。下面每处都用它，
         // 不再反复重算。
         let visible = visibleItems
@@ -1561,7 +1776,11 @@ final class AppModel {
         for item in visible {
             // 手动分组优先于版本合集：用户亲手归的类比程序认出来的关系更强，
             // 而且同一张卡不能同时出现在两摞里。
-            if let group = groupIndex[item.id], activeCardGroup == nil {
+            // 手动分组是「全部」页的组织层。分类页（尤其链接页）已经有自己
+            // 的平台筛选，那里成员按普通卡显示；不能又折成分组瓦片，点进去却
+            // 因分类过滤看不到完整成员。
+            if activeTab == .all,
+               let group = groupIndex[item.id], activeCardGroup == nil {
                 guard seenGroups.insert(group.id).inserted else { continue }
                 let members = group.itemIDs.compactMap { byID[$0] }
                 if members.count >= 2 {
@@ -1650,7 +1869,13 @@ final class AppModel {
                   let title = DocumentTitleExtraction.title(fromFirstPage: firstPage.text)
             else { return }
             self.documentTitles[item.id] = title
-            self.documentTitleGeneration &+= 1
+            // 写进缓存但不一定立刻让界面重算：拖拽中版本族重排会把卡片当场
+            // 折走。代次 bump 挂到用户放开轨道之后。
+            if self.deferStructuralChanges {
+                self.deferredDocumentTitleGenerationBump = true
+            } else {
+                self.documentTitleGeneration &+= 1
+            }
         }
     }
 
@@ -1668,7 +1893,7 @@ final class AppModel {
     @ObservationIgnored private var visibleItemsRevision = 0
     @ObservationIgnored private var visibleItemsCache: (key: VisibleItemsKey, value: [Item])?
 
-    private struct VisibleItemsKey: Equatable {
+    struct VisibleItemsKey: Equatable {
         var revision: Int
         var tab: Tab
         var query: String
@@ -2051,10 +2276,37 @@ final class AppModel {
     /// NSEvent monitor。
     private(set) var dragEndSignal = 0
 
+    @ObservationIgnored private var dragWatchdog: Task<Void, Never>?
     @ObservationIgnored private var localDragEndMonitor: Any?
     @ObservationIgnored private var globalDragEndMonitor: Any?
     @ObservationIgnored private var dragIdentityClearTask: Task<Void, Never>?
     @ObservationIgnored private var dragGeneration = 0
+    /// 拖拽期间 reload 一律挂起。乐观换位已经改了内存顺序，异步的 reload 这
+    /// 时把整份 items 替换成库里还没写完的旧顺序——被拖的卡当场弹回、旁边
+    /// 的卡集体位移，就是"拖动时抖动/消失"的头号来源。松手后补跑一次。
+    @ObservationIgnored private var reloadDeferredDuringDrag = false
+    /// 首页标题在拖拽中读到也先憋着，不 bump 版本代次——否则版本族会当着用户
+    /// 的面把 PDF 折进合集，被拖的那张"消失"。松手后再让界面重算。
+    @ObservationIgnored private var deferredDocumentTitleGenerationBump = false
+    /// 指针此刻停在卡片轨道上。
+    ///
+    /// 光标压着轨道的时候绝不重排它——这是一条硬性不变量。异步归组、版本折叠
+    /// 会让若干张卡合并成一摞：内容当场变短，而滚动位置还停在原来的偏移上，
+    /// 屏幕上就是"卡片凭空消失 + 整条错位"。用户完全没做任何操作，只是把鼠标
+    /// 移过去而已。
+    var isPointerOverTrack = false {
+        didSet {
+            guard isPointerOverTrack != oldValue, !isPointerOverTrack else { return }
+            flushDeferredStructuralWork()
+        }
+    }
+
+    /// 轨道正被用户占用：拖拽中，或者指针就停在上面。
+    var deferStructuralChanges: Bool { outboundDrag != nil || isPointerOverTrack }
+
+    /// 被推迟的自动归组。挂起不能等于丢掉——否则鼠标恰好在轨道上的那几条
+    /// 内容永远不会被归类，而这完全取决于当时手放在哪儿。
+    @ObservationIgnored private var pendingAutoGroupIDs: [UUID] = []
 
     func beginOutboundDrag(_ drag: OutboundDrag) {
         dragCompletionTask?.cancel()
@@ -2078,6 +2330,24 @@ final class AppModel {
         ) { [weak self] _ in
             Task { @MainActor in self?.finishOutboundDragInput() }
         }
+
+        // 看门狗：真正的兜底。
+        //
+        // 系统拖拽期间事件流被拖拽管理器接管，mouseUp **不一定**会送到
+        // NSEvent 监听器——尤其是把东西拖进别的应用、或者拖到屏幕外取消时。
+        // 漏掉那一下，outboundDrag 就永远留着：轨道以为还在拖，翻页箭头不
+        // 回来、边缘感应带一直活着、投放判定全都基于一次早就结束的拖拽。
+        // 按键状态是查出来的，不是等来的，所以不受事件投递影响。
+        dragWatchdog?.cancel()
+        dragWatchdog = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(80))
+                guard let self, self.outboundDrag != nil else { return }
+                guard NSEvent.pressedMouseButtons == 0 else { continue }
+                self.finishOutboundDragInput()
+                return
+            }
+        }
     }
 
     func completeOutboundDrop() {
@@ -2085,6 +2355,27 @@ final class AppModel {
         outboundDrag = nil
         dragEndSignal &+= 1
         removeOutboundDragMonitors()
+        flushDeferredStructuralWork()
+    }
+
+    /// 用户放开轨道之后，把憋着的重排一次补回来：版本代次先 bump（让重算拿到
+    /// 完整输入），再补跑挂起的自动归组，最后 reload。
+    private func flushDeferredStructuralWork() {
+        guard !deferStructuralChanges else { return }
+        if deferredDocumentTitleGenerationBump {
+            deferredDocumentTitleGenerationBump = false
+            documentTitleGeneration &+= 1
+        }
+        if !pendingAutoGroupIDs.isEmpty {
+            let queued = pendingAutoGroupIDs
+            pendingAutoGroupIDs = []
+            Task { @MainActor [weak self] in
+                for id in queued { await self?.considerAutoGrouping(id) }
+            }
+        }
+        guard reloadDeferredDuringDrag else { return }
+        reloadDeferredDuringDrag = false
+        Task { await reload() }
     }
 
     private func finishOutboundDragInput() {
@@ -2103,10 +2394,13 @@ final class AppModel {
             guard !Task.isCancelled, let self, self.dragGeneration == generation else { return }
             self.outboundDrag = nil
             self.dragIdentityClearTask = nil
+            self.flushDeferredStructuralWork()
         }
     }
 
     private func removeOutboundDragMonitors() {
+        dragWatchdog?.cancel()
+        dragWatchdog = nil
         if let localDragEndMonitor {
             NSEvent.removeMonitor(localDragEndMonitor)
             self.localDragEndMonitor = nil
@@ -4098,6 +4392,13 @@ final class AppModel {
     // MARK: - Ingest and persistence
 
     func reload() async {
+        // 拖拽进行中不改写 items。索引完成、链接元数据、待办扫描都会触发
+        // reload；让它们落进松手后的那一次。
+        guard outboundDrag == nil else {
+            reloadDeferredDuringDrag = true
+            return
+        }
+        await drainReorderPersistence()
         do {
             items = try await library.items()
             trashedItems = try await library.items(includingTrashed: true)
@@ -4162,6 +4463,8 @@ final class AppModel {
                 itemIDs: survivingItemIDs
             )
             backfillLinkCovers()
+            // 抽取器变好之后，把当年抽空了的链接补抓一遍。只跑一次。
+            Task { await backfillFailedLinkExtractions() }
         } catch {
             lastError = "读取失败：\(error.localizedDescription)"
         }
@@ -4562,19 +4865,37 @@ final class AppModel {
     /// 同一组 sortOrder；屏幕上已经是新顺序，库里却可能最后落成旧顺序，下一次
     /// reload 就回弹。链在 MainActor 上同步接长，调用顺序就是用户操作顺序。
     @ObservationIgnored private var reorderPersistenceTask: Task<Void, Never>?
+    /// 这条链接长过几次。`reload` 靠它判断排空期间有没有又来了新的换位。
+    @ObservationIgnored private var reorderEnqueueCount = 0
 
     private func enqueueReorderPersistence(
         _ operation: @escaping @MainActor () async throws -> Void
     ) {
         let previous = reorderPersistenceTask
+        reorderEnqueueCount &+= 1
         reorderPersistenceTask = Task { @MainActor [weak self] in
             _ = await previous?.result
             guard !Task.isCancelled else { return }
             do {
                 try await operation()
             } catch {
-                await self?.reload()
+                // 不在链内直接 await reload：reload 要排空这条链，而我们就是
+                // 链本身，会自己等自己。另起一个任务，等这一环结束再读。
+                Task { @MainActor [weak self] in await self?.reload() }
             }
+        }
+    }
+
+    /// 等排序写盘全部落地。
+    ///
+    /// 库是顺序的唯一权威，但它得先追上内存：写盘还在链上排队时读库，读到的
+    /// 是旧顺序，刚拖好的卡会当场弹回去。排空期间用户可能又拖了一次（链又
+    /// 接长了），所以循环到不再增长为止。
+    private func drainReorderPersistence() async {
+        var seen = -1
+        while reorderEnqueueCount != seen, let tail = reorderPersistenceTask {
+            seen = reorderEnqueueCount
+            _ = await tail.result
         }
     }
 
@@ -4655,11 +4976,21 @@ final class AppModel {
 
     func trash(_ id: UUID) async {
         let title = items.first(where: { $0.id == id })?.title
+        let groupSnapshot = cardGroup(of: id)
         do {
             try await library.trash(id: id)
             cancelQueuedAI(for: id)
+            // 用户明确删除这张卡，就立即把它从分组摘掉。CardGroupStore.detach
+            // 自带「剩一张自动解散」，不再等自动 prune 猜用户意图。
+            if groupSnapshot != nil {
+                CardGroupStore.detach(id)
+                cardGroupGeneration &+= 1
+                cardGroupIndexCache = nil
+                clearStaleCardGroupSelection()
+            }
             recentlyTrashedID = id
             recentlyTrashedTitle = title
+            recentlyTrashedGroup = groupSnapshot
             feedbackMessage = nil
             scheduleUndoDismiss()
         } catch {
@@ -4678,6 +5009,7 @@ final class AppModel {
             guard !Task.isCancelled else { return }
             self?.recentlyTrashedID = nil
             self?.recentlyTrashedTitle = nil
+            self?.recentlyTrashedGroup = nil
             self?.undoDismissTask = nil
         }
     }
@@ -4688,9 +5020,19 @@ final class AppModel {
         guard let id = recentlyTrashedID else { return }
         do {
             try await library.restore(id: id)
+            let groupSnapshot = recentlyTrashedGroup
             recentlyTrashedID = nil
             recentlyTrashedTitle = nil
+            recentlyTrashedGroup = nil
             await reload()
+            if let groupSnapshot {
+                CardGroupStore.restoreMembership(
+                    id, from: groupSnapshot, keeping: Set(items.map(\.id))
+                )
+                cardGroupGeneration &+= 1
+                cardGroupIndexCache = nil
+                normalizeGroupMembers(groupSnapshot.id, around: id)
+            }
             showTransientFeedback("已恢复 Pin")
         } catch {
             lastError = "恢复失败：\(error.localizedDescription)"
@@ -4781,14 +5123,18 @@ final class AppModel {
         }
     }
 
-    private func scheduleLinkMetadata(for item: Item) {
+    private func scheduleLinkMetadata(
+        for item: Item,
+        forceRefresh: Bool = false,
+        updateTitle: Bool = true
+    ) {
         guard shouldProcessContent(item) else { return }
         // 标题只在还没定下来时补，封面则是"没有就补"——两件事的触发条件不同。
         // 原来共用 titledLocally 一个判据，导致标题一旦解析出来，封面就永远
         // 没机会再抓，已有的链接全是通用图标。
-        let needsCover = LinkCoverStore.cachedImage(for: item.id) == nil
+        let needsCover = forceRefresh || LinkCoverStore.cachedImage(for: item.id) == nil
         guard item.kind == .link,
-              item.titledLocally || needsCover,
+              forceRefresh || item.titledLocally || needsCover,
               linkMetadataTasks[item.id] == nil,
               let url = item.linkURL else {
             return
@@ -4804,7 +5150,7 @@ final class AppModel {
                 changed = true
             }
             var current = (try? await self.library.items())?.first(where: { $0.id == item.id })
-            if let title = preview.title,
+            if updateTitle, let title = preview.title,
                current?.holding == item.holding, current?.titledLocally == true {
                 current?.title = title
                 if let current {
@@ -5006,9 +5352,24 @@ final class AppModel {
                     continue
                 }
                 guard let action = self.contentIndexAction else { return }
-                let result = await action(item)
+                let forceRefreshLink = self.forcedLinkRefreshIDs.contains(id)
+                let result = await action(item, forceRefreshLink)
                 if !result.completed && !result.waitingForEmbedding {
                     self.showEdgeStatus(.indexingFailed)
+                    if forceRefreshLink {
+                        // 新版抓取失败，旧分块/向量仍原样保留。清掉本轮强制标记，
+                        // 自动修复由下次启动按尝试次数再排；手动修复给出明确结果。
+                        self.forcedLinkRefreshIDs.remove(id)
+                        self.persistForcedLinkRefreshes()
+                        self.removePendingIndex(id)
+                        if self.knownInvalidLinkPageIDs.remove(id) != nil {
+                            await self.discardKnownInvalidLinkPage(id)
+                            self.persistKnownInvalidLinkPages()
+                        }
+                        if self.manualLinkRefreshIDs.remove(id) != nil {
+                            self.showTransientFeedback("重新解析失败，已保留原检索内容")
+                        }
+                    }
                 }
                 if result.dimensionChanged {
                     let allItems = (try? await self.library.items()) ?? []
@@ -5019,7 +5380,29 @@ final class AppModel {
                     self.persistIndexQueue()
                 }
                 if result.completed && !result.waitingForEmbedding {
+                    let wasForced = self.forcedLinkRefreshIDs.remove(id) != nil
+                    let wasManual = self.manualLinkRefreshIDs.remove(id) != nil
+                    self.persistForcedLinkRefreshes()
+                    if self.knownInvalidLinkPageIDs.remove(id) != nil {
+                        self.persistKnownInvalidLinkPages()
+                    }
+                    self.clearLinkReparseAttempt(id)
                     self.removePendingIndex(id)
+                    if wasForced, let refreshed = try? await self.library.item(id: id) {
+                        // 正文先成功，再抓封面。取消同 ID 可能还在排队的旧元数据
+                        // 任务，确保 forceRefresh 真的执行；被取消任务在写文件前会
+                        // 检查 Task.isCancelled，不会反过来覆盖新封面。
+                        self.linkMetadataTasks[id]?.cancel()
+                        self.linkMetadataTasks[id] = nil
+                        self.scheduleLinkMetadata(
+                            for: refreshed,
+                            forceRefresh: true,
+                            updateTitle: false
+                        )
+                    }
+                    if wasManual {
+                        self.showTransientFeedback("链接内容、标题和 RAG 已更新")
+                    }
                 }
                 if let delay = result.autoRetryAfter {
                     automaticRetryAfter = min(automaticRetryAfter ?? delay, delay)
@@ -5081,6 +5464,180 @@ final class AppModel {
         }
     }
 
+    // MARK: - 链接重新解析
+
+    private static let linkReparseAttemptsKey = "Pinland.linkReparseAttempts.v1"
+    private static let linkExtractionRevisionKey = "Pinland.linkExtractionRevision"
+    /// 每次结构化抽取规则有实质升级就递增。升级后旧失败次数作废，所有用户的
+    /// 老卡自动获得新规则的重试机会；不再靠开发机手工 `defaults delete`。
+    private static let linkExtractionRevision = 4
+    /// 同一条最多补抓几次。抓不到的链接确实存在（付费墙、已删除、纯视频），
+    /// 不能每次开机都去骚扰人家；但也不能一次失败就永久放弃。
+    private static let linkReparseMaxAttempts = 3
+    /// 每次升级最多补 32 条；当前库规模能一次覆盖。网络和索引仍由全局单通道
+    /// 串行执行，不会因为候选多就并发轰站点。
+    private static let linkReparseBatch = 32
+
+    /// 重新解析一条链接并原子替换 RAG。
+    ///
+    /// 旧正文、旧向量、旧封面都保留到新版完整成功。网络或 Embedding 失败时，
+    /// 用户仍能搜到上一版；成功时由索引器一次事务替换分块 + 聚合向量 + 标题。
+    func reparseLink(_ itemID: UUID) {
+        guard let item = items.first(where: { $0.id == itemID }), item.kind == .link else { return }
+        Task { @MainActor in
+            // 手动点击就是明确授权处理这条内容；临时剪贴板链接也不应被
+            // shouldProcessContent 拒绝。
+            authorizeTemporaryProcessing(itemID)
+
+            // 先停住当前串行索引任务，避免同一条链接同时跑新旧两个版本。
+            let running = indexQueueTask
+            running?.cancel()
+            _ = await running?.result
+            indexQueueTask = nil
+            indexRetryTask?.cancel()
+            indexRetryTask = nil
+            let metadataTask = linkMetadataTasks[itemID]
+            metadataTask?.cancel()
+            _ = await metadataTask?.result
+            linkMetadataTasks[itemID] = nil
+
+            // 标为强制刷新：索引器会忽略已存在的 linkPage，但不会删它；只有
+            // 新正文和向量都成功后才原子替换。
+            forcedLinkRefreshIDs.insert(itemID)
+            manualLinkRefreshIDs.insert(itemID)
+            persistForcedLinkRefreshes()
+            pendingIndexIDs.removeAll { $0 == itemID }
+            pendingIndexIDs.insert(itemID, at: 0)
+            persistIndexQueue()
+
+            // 手动重试不受自动补抓的三次上限影响。
+            var attempts = (UserDefaults.standard.dictionary(forKey: Self.linkReparseAttemptsKey)
+                as? [String: Int]) ?? [:]
+            attempts[itemID.uuidString] = nil
+            UserDefaults.standard.set(attempts, forKey: Self.linkReparseAttemptsKey)
+
+            // 先更新正文/RAG；成功后再刷新封面，避免封面请求排在正文前面。
+            resumeIndexing()
+            showTransientFeedback("正在重新解析并原子更新检索内容")
+        }
+    }
+
+    /// 把链接排进强制刷新队列。迁移/自动补抓不打断正在运行的索引；下一条会按
+    /// 串行队列处理。同一 ID 去重，避免 reload 连续触发时重复请求。
+    private func queueForcedLinkRefresh(_ itemID: UUID, prioritize: Bool = false) {
+        forcedLinkRefreshIDs.insert(itemID)
+        persistForcedLinkRefreshes()
+        pendingIndexIDs.removeAll { $0 == itemID }
+        if prioritize { pendingIndexIDs.insert(itemID, at: 0) }
+        else { pendingIndexIDs.append(itemID) }
+        persistIndexQueue()
+    }
+
+    /// 抽取失败时本地命名存下的占位标题。抓到真标题后这些该被换掉。
+    static func isFailedExtractionTitle(_ title: String) -> Bool {
+        LinkTextExtraction.isFailurePlaceholderTitle(title)
+    }
+
+    /// 只清掉网页正文那一类分块，用户备注、OCR 之类的不受影响。
+    private func clearLinkPageContent(of item: Item) async {
+        let keep = ((try? await library.chunks(for: item.id)) ?? [])
+            .filter { $0.source != .linkPage }
+        try? await library.replaceChunks(for: item.id, with: keep)
+        var refreshed = item
+        refreshed.indexedAt = nil
+        try? await library.update(refreshed)
+    }
+
+    /// 把当年抽空了的链接补抓一遍。
+    ///
+    /// 不用"跑过一次就永远不再跑"的标记：那个写法在抓取失败时同样算跑过——
+    /// 而失败恰恰是最需要重来的情况（批量重抓时撞上限流几乎是必然）。改成
+    /// **按条计次**：只挑正文确实是空的，每条最多试三次，每次开机最多几条。
+    /// 抓到了自然就不再是候选，抓不到的也不会没完没了。
+    /// 本次启动跑过没有。挂在 reload 尾部会被调用几十次——reload 本身很频繁
+    /// （收纳、索引完成、元数据回来都会触发），每次都把整库链接的分块查一遍
+    /// 纯属浪费，日志里也全是"本轮 0 条"。
+    @ObservationIgnored private var didBackfillLinksThisLaunch = false
+
+    func backfillFailedLinkExtractions() async {
+        guard !didBackfillLinksThisLaunch else { return }
+        didBackfillLinksThisLaunch = true
+        let defaults = UserDefaults.standard
+        var attempts = (defaults.dictionary(forKey: Self.linkReparseAttemptsKey)
+            as? [String: Int]) ?? [:]
+        if defaults.integer(forKey: Self.linkExtractionRevisionKey) < Self.linkExtractionRevision {
+            attempts = [:]
+            defaults.set(attempts, forKey: Self.linkReparseAttemptsKey)
+            defaults.set(Self.linkExtractionRevision, forKey: Self.linkExtractionRevisionKey)
+        }
+        let links = items.filter { $0.kind == .link && shouldProcessContent($0) }
+        guard !links.isEmpty else { return }
+
+        var candidates: [Item] = []
+        for link in links where attempts[link.id.uuidString, default: 0] < Self.linkReparseMaxAttempts {
+            let page = ((try? await library.chunks(for: link.id)) ?? [])
+                .filter { $0.source == .linkPage }
+            let longest = page
+                .flatMap { $0.text.split(whereSeparator: \.isNewline) }
+                .map(\.count)
+                .max() ?? 0
+            let platform = link.linkURL.flatMap(LinkPlatform.resolve)
+            let isXiaohongshuLoginWall = platform == .xiaohongshu
+                && page.contains { SiteContentExtraction.Xiaohongshu.isLoginWall($0.text) }
+            // 小红书/Discourse 的结构化内容可能本来就很短（几十字帖子也完全
+            // 合法），不能按通用网页 120 字门槛反复重抓。有 linkPage 且不是
+            // 已知登录墙/失败标题就算成功；普通网页仍用段落长度判断导航噪音。
+            let structuralPlatform = platform == .xiaohongshu || platform == .linuxdo
+            let bodyMissing = structuralPlatform ? page.isEmpty
+                : longest < LinkTextExtraction.proseParagraphLength
+            let needsRepair = bodyMissing
+                || Self.isFailedExtractionTitle(link.title)
+                || isXiaohongshuLoginWall
+            guard needsRepair else { continue }
+            if isXiaohongshuLoginWall { knownInvalidLinkPageIDs.insert(link.id) }
+            candidates.append(link)
+            if candidates.count >= Self.linkReparseBatch { break }
+        }
+        guard !candidates.isEmpty else { return }
+        persistKnownInvalidLinkPages()
+
+        // 逆序插到队首，最终保持 candidates 原顺序；正文修复优先于原有待办，
+        // 所有请求仍由 LinkFetchScheduler 单通道串行。
+        for item in candidates.reversed() {
+            attempts[item.id.uuidString, default: 0] += 1
+            queueForcedLinkRefresh(item.id, prioritize: true)
+        }
+        defaults.set(attempts, forKey: Self.linkReparseAttemptsKey)
+        resumeIndexing()
+    }
+
+    private func persistKnownInvalidLinkPages() {
+        UserDefaults.standard.set(
+            knownInvalidLinkPageIDs.map(\.uuidString).sorted(),
+            forKey: Self.knownInvalidLinkPageKey
+        )
+    }
+
+    /// 删除已经确认是登录墙的网页分块，并同步清空聚合向量；用户备注和 URL
+    /// 分块保留。用原子 API，绝不留下“分块已删但 Item 仍指向旧向量”的状态。
+    private func discardKnownInvalidLinkPage(_ itemID: UUID) async {
+        guard var item = try? await library.item(id: itemID) else { return }
+        let keep = ((try? await library.chunks(for: itemID)) ?? [])
+            .filter { $0.source != .linkPage }
+        item.vector = nil
+        item.contentHash = keep.map(\.contentHash).joined(separator: ":")
+        item.embeddingModelID = nil
+        item.indexedAt = nil
+        try? await library.replaceChunks(for: itemID, with: keep, updating: item)
+    }
+
+    private func clearLinkReparseAttempt(_ itemID: UUID) {
+        var attempts = (UserDefaults.standard.dictionary(forKey: Self.linkReparseAttemptsKey)
+            as? [String: Int]) ?? [:]
+        guard attempts.removeValue(forKey: itemID.uuidString) != nil else { return }
+        UserDefaults.standard.set(attempts, forKey: Self.linkReparseAttemptsKey)
+    }
+
     private func enqueueIndex(_ id: UUID, item suppliedItem: Item? = nil) {
         guard !pendingIndexIDs.contains(id),
               let item = suppliedItem ?? items.first(where: { $0.id == id }),
@@ -5098,6 +5655,13 @@ final class AppModel {
 
     private func persistIndexQueue() {
         UserDefaults.standard.set(pendingIndexIDs.map(\.uuidString), forKey: Self.indexQueueKey)
+    }
+
+    private func persistForcedLinkRefreshes() {
+        UserDefaults.standard.set(
+            forcedLinkRefreshIDs.map(\.uuidString).sorted(),
+            forKey: Self.forcedLinkRefreshKey
+        )
     }
 
     private func showEdgeStatus(_ signal: EdgeStatusSignal) {

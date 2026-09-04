@@ -26,6 +26,34 @@ enum LinkContentFetcher {
         var kind: LinkContentKind
         /// 跟随重定向之后的最终地址。
         var finalURL: URL
+        /// 内容天然的分段（论坛的一层楼）。有就按它切块，没有就按字数切。
+        var segments: [String]?
+    }
+
+    /// 站点各自的结构化出口。全部是这些站点**自己公开的**接口或内嵌状态，
+    /// 判据也来自页面自报的身份，不做域名硬编码之外的猜测。
+    private static func structuredExtraction(
+        html: String, url: URL, request: URLRequest
+    ) async -> LinkTextExtraction.Extracted? {
+        // Discourse：话题页是 Ember 空壳，同一个地址加 `.json` 就是整串楼层。
+        // linux.do 是已知 Discourse；即便 HTML 恰好是 Cloudflare challenge，
+        // 仍直接尝试官方 topic JSON。其他论坛继续靠 generator 自报识别。
+        if (LinkPlatform.resolve(url) == .linuxdo
+                || SiteContentExtraction.Discourse.isDiscoursePage(html)),
+           let jsonURL = SiteContentExtraction.Discourse.topicJSONURL(for: url) {
+            var jsonRequest = request
+            jsonRequest.url = jsonURL
+            if let (data, _) = await load(jsonRequest),
+               let extracted = SiteContentExtraction.Discourse.extract(fromTopicJSON: data) {
+                return extracted
+            }
+        }
+        // 小红书：笔记全文在 __INITIAL_STATE__ 里，比被截断的 meta 完整。
+        if let note = SiteContentExtraction.Xiaohongshu.extract(fromHTML: html) {
+            let title = LinkTextExtraction.fromHTML(html, baseURL: url).title
+            return LinkTextExtraction.Extracted(title: title, text: LinkTextExtraction.clamp(note))
+        }
+        return nil
     }
 
     /// 下载上限。超过就中断连接，不是读完再丢——一个几百 MB 的视频链接
@@ -52,20 +80,26 @@ enum LinkContentFetcher {
     static func fetch(_ url: URL) async -> Fetched? {
         guard isFetchable(url) else { return nil }
 
-        var request = URLRequest(url: url, timeoutInterval: timeout)
-        // 表明身份。匿名抓取容易被当成爬虫拦掉，而且对站点不礼貌。
-        // 表明身份。匿名抓取容易被当成爬虫拦掉，而且对站点不礼貌。
-        //
-        // 试过换成真实 Safari UA，实测更差：知乎完全没变化（它拦的不是 UA，
-        // 是没有 Cookie 的裸请求），而 B 站直接从 3400 字节掉到 71 字节——
-        // 伪装成浏览器反而触发了更严的风控。真正能翻过这类墙的是下面那步
-        // headless 渲染：那是货真价实的 WebKit，不是伪装。
-        request.setValue(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X) Mnemo/1.0 (+link preview)",
-            forHTTPHeaderField: "User-Agent"
-        )
-        request.setValue("zh-CN,zh;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")
+        // linux.do 已知是 Discourse，直接走官方 topic JSON：少一次 Ember 空壳
+        // HTML 请求，也不依赖 HTML 的 generator 是否被 Cloudflare challenge 替换。
+        if LinkPlatform.resolve(url) == .linuxdo,
+           let jsonURL = SiteContentExtraction.Discourse.topicJSONURL(for: url) {
+            var jsonRequest = standardRequest(for: jsonURL)
+            jsonRequest.setValue("application/json", forHTTPHeaderField: "Accept")
+            if let (data, response) = await load(jsonRequest),
+               let extracted = SiteContentExtraction.Discourse.extract(fromTopicJSON: data) {
+                return Fetched(
+                    title: extracted.title,
+                    text: extracted.text,
+                    kind: .webPage,
+                    finalURL: response.url ?? url,
+                    segments: extracted.segments
+                )
+            }
+            // JSON 临时失败才退回通用网页路径；旧 RAG 在整个刷新失败时仍保留。
+        }
 
+        var request = standardRequest(for: url)
         guard let (data, response) = await load(request) else { return nil }
         let finalURL = response.url ?? url
         let mime = (response.mimeType ?? "").lowercased()
@@ -73,38 +107,68 @@ enum LinkContentFetcher {
         switch LinkContentKind.of(mimeType: mime, url: finalURL) {
         case .webPage:
             guard let html = decodeText(data, response: response) else { return nil }
-            var extracted = LinkTextExtraction.fromHTML(html, baseURL: finalURL)
+            let generic = LinkTextExtraction.fromHTML(html, baseURL: finalURL)
 
-            // 静态 HTML 里没有正文，说明这是一张前端渲染的空壳页。
+            // 站点自己提供的结构化正文优先于通用 DOM。
             //
-            // 这类站点现在很常见：实测 Apple 的 HIG 页面静态抽取正文是 0 字，
-            // 而维基百科同样的代码能拿到五千多字。不补这一步，"链接可以被
-            // 自然语言检索"在这类站点上就是一句空话。
-            //
-            // 闸门是客观的——真的取到了零字，不是猜"这页可能是 SPA"。
-            // 渲染一次要起 WebKit、跑页面脚本、等它加载完，秒级开销；
-            // 而它挂在链接被固定之后的索引路径上，一条链接一辈子只跑一次。
-            // 闸门看的是"有没有成段的正文"，不是"有多少字"。
-            // 旧写法用总字数，结果一屏导航菜单就能凑够 200 字把兜底挡掉。
-            if extracted.longestParagraph < LinkTextExtraction.proseParagraphLength,
-               !Task.isCancelled,
-               let rendered = await HeadlessPageRenderer.renderedHTML(of: finalURL) {
-                let second = LinkTextExtraction.fromHTML(rendered, baseURL: finalURL)
-                // 同样按正文密度取胜者：渲染后总字数可能反而更少（噪音被去掉了），
-                // 但只要它有成段的正文，它就是更好的那一份。
-                if second.longestParagraph > extracted.longestParagraph
-                    || (second.longestParagraph == extracted.longestParagraph
-                        && second.text.count > extracted.text.count) {
-                    extracted = second
+            // 旧顺序是「通用结果太短才尝试结构化」：小红书登录框 + 评论区很容易
+            // 凑出一段超过 120 字，于是它被误判成正文，真正的 __INITIAL_STATE__
+            // 永远没有机会执行。结构化出口是页面自己的权威数据，不能拿噪音长度
+            // 跟它竞赛。linux.do 同理：Discourse JSON 才是帖子正文，Ember 外壳不是。
+            var extracted: LinkTextExtraction.Extracted
+            if let structured = await structuredExtraction(
+                html: html, url: finalURL, request: request
+            ) {
+                extracted = structured
+            } else if LinkPlatform.resolve(finalURL) == .xiaohongshu {
+                // 小红书结构化状态有时会因分享 token 过期而缺失。这时只接受
+                // 页面 meta 摘要；通用 DOM 里那一大段“扫码/手机号登录/用户协议”
+                // 再长也只是登录墙，绝不能写进 RAG。
+                guard let summary = generic.summary,
+                      !SiteContentExtraction.Xiaohongshu.isLoginWall(summary) else { return nil }
+                extracted = LinkTextExtraction.Extracted(
+                    title: generic.title,
+                    text: summary,
+                    summary: summary
+                )
+            } else {
+                extracted = generic
+                // 普通前端站点没有结构化出口时，静态 DOM 太稀才启动 WebKit。
+                if extracted.longestParagraph < LinkTextExtraction.proseParagraphLength,
+                   !Task.isCancelled,
+                   let rendered = await HeadlessPageRenderer.renderedHTML(of: finalURL) {
+                    let second = LinkTextExtraction.fromHTML(rendered, baseURL: finalURL)
+                    if second.longestParagraph > extracted.longestParagraph
+                        || (second.longestParagraph == extracted.longestParagraph
+                            && second.text.count > extracted.text.count) {
+                        extracted = second
+                    }
                 }
             }
 
+            // 最后的兜底：页面自报的摘要。对没有专用结构化出口的 SPA，
+            // 它可能是唯一能匿名拿到的内容。
+            if extracted.longestParagraph < LinkTextExtraction.proseParagraphLength,
+               let summary = extracted.summary ?? generic.summary,
+               summary.count > extracted.text.count {
+                extracted = LinkTextExtraction.Extracted(
+                    title: extracted.title ?? generic.title,
+                    text: summary,
+                    summary: summary
+                )
+            }
+
             guard !extracted.isEmpty else { return nil }
+            if LinkPlatform.resolve(finalURL) == .xiaohongshu,
+               SiteContentExtraction.Xiaohongshu.isLoginWall(extracted.text) {
+                return nil
+            }
             return Fetched(
                 title: extracted.title,
                 text: extracted.text,
                 kind: .webPage,
-                finalURL: finalURL
+                finalURL: finalURL,
+                segments: extracted.segments
             )
 
         case .pdf:
@@ -148,26 +212,61 @@ enum LinkContentFetcher {
         }
     }
 
+    private static func standardRequest(for url: URL) -> URLRequest {
+        var request = URLRequest(url: url, timeoutInterval: timeout)
+        // 试过伪装成真实 Safari UA，知乎没变化、B 站反而触发更严风控；
+        // 用诚实的应用标识，真正需要 JS 的页面交给 WebKit。
+        request.setValue(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X) Mnemo/1.0 (+link preview)",
+            forHTTPHeaderField: "User-Agent"
+        )
+        request.setValue("zh-CN,zh;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")
+        return request
+    }
+
     // MARK: - 读取
 
     /// 流式读取并在超出上限时立刻中断。
-    private static func load(_ request: URLRequest) async -> (Data, URLResponse)? {
+    /// 被限流时最多退让重试几次。
+    ///
+    /// 批量重抓时同一个站点会连着来好几条（用户收藏的往往就集中在几个站），
+    /// 429 是必然会撞上的。之前撞上就当作"这条抓不到"永久放弃——而它只是
+    /// 让我们等一会儿。这条路径跑在后台索引里，等几秒不挡任何交互。
+    private static let rateLimitRetries = 2
+
+    private static func load(_ request: URLRequest, attempt: Int = 0) async -> (Data, URLResponse)? {
+        guard let url = request.url else { return nil }
+        // 租约覆盖“发请求 + 把响应流读完”整个周期，不只是错开发车时刻。
+        let lease = await LinkFetchScheduler.acquire(for: url)
+        let loaded: (Data, URLResponse)?
         do {
             let (stream, response) = try await URLSession.shared.bytes(for: request)
-            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-                return nil
-            }
             var data = Data()
             data.reserveCapacity(min(maximumBytes, 512 * 1024))
             for try await byte in stream {
                 data.append(byte)
                 if data.count >= maximumBytes { break }
-                if Task.isCancelled { return nil }
+                if Task.isCancelled { throw CancellationError() }
             }
-            return (data, response)
+            loaded = (data, response)
         } catch {
+            loaded = nil
+        }
+        await LinkFetchScheduler.release(lease)
+        guard let (data, response) = loaded else { return nil }
+        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            // 429 / 503 是“稍后再来”，不是“没有这个东西”。重试会重新排队，
+            // 不会在等待 Retry-After 时霸占全局通道。
+            if [429, 503].contains(http.statusCode), attempt < rateLimitRetries {
+                let advised = http.value(forHTTPHeaderField: "Retry-After").flatMap(Double.init)
+                let wait = min(max(advised ?? Double(attempt + 1) * 3, 1), 15)
+                try? await Task.sleep(for: .seconds(wait))
+                guard !Task.isCancelled else { return nil }
+                return await load(request, attempt: attempt + 1)
+            }
             return nil
         }
+        return (data, response)
     }
 
     /// 按响应声明的编码解码；没声明就先试 UTF-8，再试 GB18030。

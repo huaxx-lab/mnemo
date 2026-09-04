@@ -618,3 +618,49 @@ func userAnnotationBecomesRetrievableText() {
     #expect(UserAnnotationText.build(title: nil, tags: [], group: nil) == nil)
     #expect(UserAnnotationText.build(title: "  ", tags: ["  "], group: nil) == nil)
 }
+
+@Test("重新解析原子替换正文分块、聚合向量与真实标题")
+func linkRefreshCommitsRAGAtomically() async throws {
+    let (library, _, _) = try makeLibrary()
+    var item = try await library.ingest(text: "https://linux.do/t/topic/2808529")
+    item.kind = .link
+    item.title = "无法访问链接内容"
+    item.titledLocally = true
+    item.vector = [0.1, 0.2]
+    item.contentHash = "old-hash"
+    item.embeddingModelID = "old-model"
+    item.indexedAt = Date(timeIntervalSince1970: 10)
+    try await library.update(item)
+    try await library.replaceChunks(
+        for: item.id,
+        with: [ContentChunk(itemID: item.id, ordinal: 0, source: .linkPage, text: "旧正文")]
+    )
+
+    var refreshed = item
+    refreshed.title = "解读 DeepSeek Harness 的核心论文"
+    refreshed.vector = [0.8, 0.9]
+    refreshed.contentHash = "new-hash"
+    refreshed.embeddingModelID = "new-model"
+    refreshed.indexedAt = Date(timeIntervalSince1970: 20)
+    let newChunks = [
+        ContentChunk(
+            itemID: item.id,
+            ordinal: 0,
+            source: .linkPage,
+            text: "《解读 DeepSeek Harness 的核心论文》\n#1 author：完整正文",
+            vector: [0.8, 0.9],
+            embeddingModelID: "new-model"
+        )
+    ]
+
+    try await library.replaceChunks(for: item.id, with: newChunks, updating: refreshed)
+
+    let stored = try #require(try await library.item(id: item.id))
+    let chunks = try await library.chunks(for: item.id)
+    #expect(stored.title == "解读 DeepSeek Harness 的核心论文")
+    #expect(stored.vector == [0.8, 0.9])
+    #expect(stored.contentHash == "new-hash")
+    #expect(stored.embeddingModelID == "new-model")
+    #expect(stored.indexedAt == Date(timeIntervalSince1970: 20))
+    #expect(chunks.map(\.text) == ["《解读 DeepSeek Harness 的核心论文》\n#1 author：完整正文"])
+}

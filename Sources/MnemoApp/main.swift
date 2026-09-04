@@ -139,14 +139,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self, self.model.isFeatureUnlocked(.ai) else { return nil }
             return await self.providerSettings.transform(item, action: action)
         }
-        model.contentIndexAction = { [weak self] item in
+        model.contentIndexAction = { [weak self] item, forceRefreshLink in
             guard let self, self.model.isFeatureUnlocked(.ai) else {
                 return IndexingRunResult(completed: false, dimensionChanged: false)
             }
             return await SemanticIndexCoordinator.index(
                 item: item,
                 library: self.model.library,
-                settings: self.providerSettings
+                settings: self.providerSettings,
+                forceRefreshLink: forceRefreshLink
             )
         }
         model.clipboardContextAction = { [weak self] event, items, sourceItemID, isExplicit in

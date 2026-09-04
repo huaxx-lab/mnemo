@@ -276,15 +276,16 @@ func extractionIsFastEnough() {
     // 是后者。不热身的话这个测试会随机红，取决于同一进程里谁先跑。
     _ = ClipboardTodoExtractor.drafts(from: blob, now: now, calendar: calendar)
 
-    // 取几趟里最快的一趟：测试机上并行跑着别的用例，单次采样会被调度噪声主导。
+    // 量 CPU 时间而不是墙钟：并行跑用例时墙钟主要反映被抢占了多久，
+    // 而这里要断言的是这段提取本身贵不贵。
     var best = Double.infinity
     for _ in 0..<5 {
-        let started = Date()
-        _ = ClipboardTodoExtractor.drafts(from: blob, now: now, calendar: calendar)
-        best = min(best, Date().timeIntervalSince(started))
+        best = min(best, cpuSeconds {
+            _ = ClipboardTodoExtractor.drafts(from: blob, now: now, calendar: calendar)
+        })
     }
     // 只截断到 4,000 字符，加上正则缓存，这一趟应当远低于一次界面刷新的预算。
-    #expect(best < 0.05, "最快一趟 \(String(format: "%.1f", best * 1_000)) ms")
+    #expect(best < 0.05, "最快一趟 \(String(format: "%.1f", best * 1_000)) ms CPU")
 }
 
 @Test("本地多任务和模型使用同一个五条安全上限")

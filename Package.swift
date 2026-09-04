@@ -54,6 +54,7 @@ let package = Package(
             name: "MnemoCoreTests",
             dependencies: [
                 "MnemoCore",
+                "MnemoStore",
                 .product(name: "ZIPFoundation", package: "ZIPFoundation"),
             ]
         ),
