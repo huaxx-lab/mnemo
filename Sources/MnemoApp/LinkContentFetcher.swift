@@ -56,7 +56,9 @@ enum LinkContentFetcher {
                 ?? LinkTextExtraction.fromHTML(html, baseURL: url).title
             return LinkTextExtraction.Extracted(
                 title: title,
-                text: LinkTextExtraction.clamp(note)
+                text: LinkTextExtraction.clamp(note),
+                // 清单体正文按作者换的行分段，分块不再把相邻条目拦腰切断。
+                segments: SiteContentExtraction.Xiaohongshu.bodySegments(fromHTML: html)
             )
         }
         // GitHub 仓库页：正文是文件树和导航，真正有检索价值的 README 在

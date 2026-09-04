@@ -119,20 +119,26 @@ enum SemanticIndexCoordinator {
             }
         }
 
-        // 链接的首图也进 RAG。
+        // 链接的配图也进 RAG。
         //
         // 小红书这类内容常常**根本不在文字里**：正文只有一句"见图"，信息全
-        // 写在配图上。不读图的话这类笔记进了库也搜不到。首图已经被
-        // LinkCoverStore 缓存成本地 PNG，这里不再发网络请求。
+        // 写在配图上，而且经常不止一张。配图已被 LinkCoverStore 缓存到本地，
+        // 这里不再发网络请求。优先用全分辨率副本：卡片那张只有 240px，字一密
+        // OCR 就只剩噪声。
         if item.kind == .link, !Task.isCancelled {
-            let cover = LinkCoverStore.url(for: item.id)
-            if FileManager.default.fileExists(atPath: cover.path) {
-                let coverChunks = await SemanticContentExtractor.linkCoverChunks(
+            var imageURLs = LinkCoverStore.ocrSourceURLs(for: item.id)
+            if imageURLs.isEmpty {
+                let cover = LinkCoverStore.url(for: item.id)
+                if FileManager.default.fileExists(atPath: cover.path) { imageURLs = [cover] }
+            }
+            for imageURL in imageURLs {
+                guard !Task.isCancelled else { break }
+                let imageChunks = await SemanticContentExtractor.linkCoverChunks(
                     itemID: item.id,
-                    coverURL: cover,
+                    coverURL: imageURL,
                     ordinalBase: chunks.count
                 )
-                chunks.append(contentsOf: coverChunks)
+                chunks.append(contentsOf: imageChunks)
             }
         }
 

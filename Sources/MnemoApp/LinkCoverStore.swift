@@ -33,12 +33,20 @@ enum LinkCoverStore {
         return NSImage(contentsOf: file)
     }
 
+    /// 卡片封面和检索用配图是同一族文件，删条目时一起清。
     static func remove(_ itemID: UUID) {
-        try? FileManager.default.removeItem(at: url(for: itemID))
+        let prefix = itemID.uuidString
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        for name in names where name.hasPrefix(prefix) {
+            try? FileManager.default.removeItem(at: directory.appending(path: name))
+        }
     }
 
     /// 抓标题与封面。两者都可能拿不到，各自独立。
-    static func fetch(for target: URL) async -> (title: String?, cover: NSImage?) {
+    ///
+    /// `ocrImages` 是检索用的**全分辨率**配图：卡片封面落盘前会缩到 240px，
+    /// 而"信息写在图上"的配图恰恰需要看清小字——喂给 OCR 的不能是卡片尺寸。
+    static func fetch(for target: URL) async -> (title: String?, cover: NSImage?, ocrImages: [NSImage]) {
         let platform = LinkPlatform.resolve(target)
         let metadata: LPLinkMetadata?
         if platform == .xiaohongshu {
@@ -64,12 +72,16 @@ enum LinkCoverStore {
 
         let title = metadata?.title?.trimmingCharacters(in: .whitespacesAndNewlines)
         var cover: NSImage?
+        var ocrImages: [NSImage] = []
 
         // 小红书必须先读 imageList：LPMetadataProvider / og:image 经常给的是
         // 平台静态 logo，不是这条笔记的配图。用户要求是「真实配图优先，拿不到
-        // 才用 logo」，所以这里不能先信 metadata。
+        // 才用 logo」，所以这里不能先信 metadata。图单一次取回：第一张当封面，
+        // 整单进检索——清单 / 攻略类笔记的内容分布在好几张图上。
         if platform == .xiaohongshu {
-            cover = await openGraphImage(for: target)
+            let images = await noteImages(for: target)
+            cover = images.first
+            ocrImages = images
         }
         // 其他站点优先系统元数据；视频封面常在 videoProvider。
         if cover == nil, let source = metadata?.imageProvider ?? metadata?.videoProvider {
@@ -78,15 +90,77 @@ enum LinkCoverStore {
         if cover == nil, platform != .xiaohongshu {
             cover = await openGraphImage(for: target)
         }
-        // 真配图、og:image 都没有，最后才退回站点 logo。
+        // 走到这一步拿到的都是页面真实配图，进检索；站点 logo 只是卡片占位，
+        // 不给 OCR——一张红色 logo 识别出的"文字"只会污染检索。
+        if ocrImages.isEmpty, let cover { ocrImages = [cover] }
         if cover == nil { cover = await siteIcon(for: target) }
-        return (title.flatMap { $0.isEmpty ? nil : String($0.prefix(80)) }, cover)
+        return (title.flatMap { $0.isEmpty ? nil : String($0.prefix(80)) }, cover, ocrImages)
+    }
+
+    /// 小红书笔记的整单配图。抓一次 HTML，把 imageList 里前几张都取回来。
+    private static func noteImages(for target: URL) async -> [NSImage] {
+        var request = URLRequest(url: target, timeoutInterval: 10)
+        request.setValue(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X) Mnemo/1.0 (+link preview)",
+            forHTTPHeaderField: "User-Agent"
+        )
+        request.setValue("zh-CN,zh;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")
+        guard let (data, response) = await loadData(request),
+              (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) == true,
+              let html = String(data: data, encoding: .utf8)
+                ?? String(data: data, encoding: .init(rawValue: 0x80000632))
+        else { return [] }
+        var images: [NSImage] = []
+        for imageURL in SiteContentExtraction.Xiaohongshu.noteImageURLs(fromHTML: html) {
+            var imageRequest = URLRequest(url: imageURL, timeoutInterval: 10)
+            imageRequest.setValue(target.absoluteString, forHTTPHeaderField: "Referer")
+            guard let (imageData, imageResponse) = await loadData(imageRequest),
+                  (imageResponse as? HTTPURLResponse)
+                    .map({ (200..<300).contains($0.statusCode) }) == true,
+                  let image = NSImage(data: imageData), image.size.width > 0 else { continue }
+            images.append(image)
+        }
+        return images
     }
 
     @discardableResult
     static func store(_ image: NSImage, for itemID: UUID) -> Bool {
-        guard let png = downscaled(image) else { return false }
+        guard let scaled = resized(image, maxPixel: maximumPixelSize),
+              let png = bitmapData(scaled, type: .png) else { return false }
         return (try? png.write(to: url(for: itemID), options: .atomic)) != nil
+    }
+
+    /// 检索用配图落盘：保留看得清小字的分辨率，和 240px 的卡片封面分开存。
+    /// 先清旧图再写——笔记换过图时，不能让上一版多出来的图留在盘里继续被索引。
+    static func storeOCRSources(_ images: [NSImage], for itemID: UUID) {
+        let prefix = "\(itemID.uuidString).ocr-"
+        let stale = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        for name in stale where name.hasPrefix(prefix) {
+            try? FileManager.default.removeItem(at: directory.appending(path: name))
+        }
+        for (index, image) in images.enumerated() {
+            guard let scaled = resized(image, maxPixel: ocrMaximumPixelSize),
+                  // JPEG 就够：OCR 认的是笔画边缘，不认 PNG 的无损；文件小一个量级。
+                  let data = bitmapData(scaled, type: .jpeg, quality: 0.85) else { continue }
+            try? data.write(
+                to: directory.appending(path: "\(prefix)\(index).jpg"),
+                options: .atomic
+            )
+        }
+    }
+
+    /// 已缓存的检索用配图，按下标顺序；空数组时调用方退回卡片封面。
+    ///
+    /// 纯路径与目录枚举，没有任何可变状态——索引那条并发链路要用它去读缓存
+    /// 好的文件，没必要为此跳一次主线程。
+    nonisolated static func ocrSourceURLs(for itemID: UUID) -> [URL] {
+        let prefix = "\(itemID.uuidString).ocr-"
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        // 下标是个位数（图单有上限），字典序即数值序。
+        return names
+            .filter { $0.hasPrefix(prefix) && $0.hasSuffix(".jpg") }
+            .sorted()
+            .map { directory.appending(path: $0) }
     }
 
     /// URLSession 请求也走同一租约；数据留在 MainActor 上，不跨 actor 传递。
@@ -171,12 +245,15 @@ enum LinkCoverStore {
         }
     }
 
-    /// 缩到卡片真正需要的尺寸再落盘。og:image 动辄 1200×630，原样存下来
-    /// 每张几百 KB，解码也慢。
-    private static func downscaled(_ image: NSImage) -> Data? {
+    /// OCR 输入的上限。1,600px 对图文混排的识别已经足够，再大只是磁盘和解码时间。
+    private static let ocrMaximumPixelSize: CGFloat = 1_600
+
+    /// 缩到目标尺寸。og:image 动辄 1200×630 往上，原样存下来每张几百 KB，
+    /// 解码也慢。
+    private static func resized(_ image: NSImage, maxPixel: CGFloat) -> NSImage? {
         let size = image.size
         guard size.width > 0, size.height > 0 else { return nil }
-        let scale = min(1, maximumPixelSize / max(size.width, size.height))
+        let scale = min(1, maxPixel / max(size.width, size.height))
         let target = NSSize(width: size.width * scale, height: size.height * scale)
 
         let output = NSImage(size: target)
@@ -189,9 +266,18 @@ enum LinkCoverStore {
             fraction: 1
         )
         output.unlockFocus()
+        return output
+    }
 
-        guard let tiff = output.tiffRepresentation,
+    private static func bitmapData(
+        _ image: NSImage,
+        type: NSBitmapImageRep.FileType,
+        quality: Double? = nil
+    ) -> Data? {
+        guard let tiff = image.tiffRepresentation,
               let bitmap = NSBitmapImageRep(data: tiff) else { return nil }
-        return bitmap.representation(using: .png, properties: [:])
+        var properties: [NSBitmapImageRep.PropertyKey: Any] = [:]
+        if let quality { properties[.compressionFactor] = quality }
+        return bitmap.representation(using: type, properties: properties)
     }
 }

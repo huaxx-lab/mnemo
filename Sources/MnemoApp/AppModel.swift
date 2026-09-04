@@ -5160,8 +5160,13 @@ final class AppModel {
             defer { self.linkMetadataTasks[item.id] = nil }
 
             // 封面和标题各自独立：抓到哪个算哪个。
+            let hadOCRSources = !LinkCoverStore.ocrSourceURLs(for: item.id).isEmpty
             var changed = false
             if let cover = preview.cover, LinkCoverStore.store(cover, for: item.id) {
+                changed = true
+            }
+            if !preview.ocrImages.isEmpty {
+                LinkCoverStore.storeOCRSources(preview.ocrImages, for: item.id)
                 changed = true
             }
             var current = (try? await self.library.items())?.first(where: { $0.id == item.id })
@@ -5176,6 +5181,12 @@ final class AppModel {
             if changed {
                 self.linkCoverGenerations[item.id, default: 0] &+= 1
                 await self.reload()
+            }
+            // 配图是新的，而索引很可能已经在没有配图的时候跑完了——那条链接在
+            // 检索眼里少了图上的全部内容。补排一次索引：正文分块按 contentHash
+            // 复用，真正多出来的只有配图 OCR 这一次；已在队列里时自动去重。
+            if !hadOCRSources, !preview.ocrImages.isEmpty {
+                self.enqueueIndex(item.id, item: current)
             }
         }
     }

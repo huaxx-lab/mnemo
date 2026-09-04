@@ -39,6 +39,86 @@ func xiaohongshuStripsTopicMarkers() throws {
     #expect(body.contains("考研人"), "主题词是这条笔记的内容，不能一起删掉")
 }
 
+@Test("小红书：清单体正文按作者换的行分段")
+func xiaohongshuListBodySplitsIntoLines() throws {
+    let html = try fixture("xhs-with-title")
+    let segments = try #require(SiteContentExtraction.Xiaohongshu.bodySegments(fromHTML: html))
+    // 真实笔记：48 条编号面试题 + 结尾一句反问体会。
+    #expect(segments.count == 49)
+    #expect(segments.first?.hasPrefix("1.北京作为工作地点") == true)
+    #expect(segments.last?.hasPrefix("无手撕") == true)
+
+    // 这份笔记总长没超过一个窗口，正确结果恰恰是不切——整块留下，
+    // 按段缝拆开要恰好还原每一行。
+    let chunks = ContentChunking.chunks(
+        itemID: UUID(),
+        segments: segments,
+        source: .linkPage,
+        pageNumber: nil,
+        ordinalBase: 0
+    )
+    #expect(chunks.flatMap { $0.text.components(separatedBy: "\n\n") } == segments)
+}
+
+@Test("小红书：长清单分块沿行边界走，按字数硬切会对照出半行")
+func xiaohongshuLongListChunksOnLineBoundaries() throws {
+    // 60 条、每条约 30 字，总量超出一个窗口：这是分块真正要做选择的场景。
+    let lines = (1...60).map { "第\($0)条清单：这是一条大约三十个字左右的条目内容填充填充" }
+    let jsonDesc = lines.joined(separator: "\\n")
+    let html = """
+    <html><body><script>window.__INITIAL_STATE__={"note":{"noteDetailMap":{"x":{"note":
+    {"desc":"\(jsonDesc)","imageList":[]}}}}}</script></body></html>
+    """
+    let segments = try #require(SiteContentExtraction.Xiaohongshu.bodySegments(fromHTML: html))
+    #expect(segments == lines)
+
+    let chunks = ContentChunking.chunks(
+        itemID: UUID(), segments: segments, source: .linkPage,
+        pageNumber: nil, ordinalBase: 0
+    )
+    #expect(chunks.count > 1, "超过一个窗口的长清单不该只有一块")
+    for chunk in chunks {
+        for piece in chunk.text.components(separatedBy: "\n\n") {
+            #expect(lines.contains(piece), "块里出现了被切断的半行：\(piece)")
+        }
+    }
+
+    // 对照组：同一段文字按字数硬切，第一块必然断在某一条的中间。
+    let hardChunks = ContentChunking.chunks(
+        itemID: UUID(), text: lines.joined(separator: "\n"), source: .linkPage,
+        pageNumber: nil, ordinalBase: 0
+    )
+    #expect(hardChunks.count > 1)
+    #expect(hardChunks[0].text.components(separatedBy: "\n").contains { !lines.contains($0) })
+}
+
+@Test("小红书：多图笔记的每张配图地址都能取到，按顺序、取原图")
+func xiaohongshuListsAllNoteImages() throws {
+    // 这份样本由真实页面派生：真实页面本身只有一张图，覆盖不了"多图"这条
+    // 规则，第二条图片记录是按同页第一条的真实结构复制的。
+    let html = try fixture("xhs-multi-image")
+    let urls = SiteContentExtraction.Xiaohongshu.noteImageURLs(fromHTML: html)
+    #expect(urls.count == 2)
+    #expect(urls[0].absoluteString.contains("1040g2sg"), "顺序要跟笔记里的图序一致")
+    #expect(urls[1].absoluteString.contains("2040g2sg"))
+    for url in urls {
+        #expect(url.scheme == "https", "状态里的 http CDN 必须升级成 HTTPS")
+        #expect(url.absoluteString.contains("nd_dft"), "要原图，不要预览小图")
+        #expect(!url.absoluteString.contains("u002F"), "路径转义没解开：\(url)")
+    }
+    // 首图接口与全量接口必须指向同一张图。
+    #expect(SiteContentExtraction.Xiaohongshu.noteImageURL(fromHTML: html) == urls.first)
+}
+
+@Test("小红书：正文只有一行时不分段，交给通用按字数切")
+func xiaohongshuSingleLineBodyHasNoSegments() throws {
+    let html = """
+    <html><body><script>window.__INITIAL_STATE__={"note":{"noteDetailMap":{"x":{"note":
+    {"desc":"就一句话的笔记，没有换行","imageList":[]}}}}}</script></body></html>
+    """
+    #expect(SiteContentExtraction.Xiaohongshu.bodySegments(fromHTML: html) == nil)
+}
+
 @Test("GitHub：仓库页认得出来，功能页不会被误判")
 func gitHubRecognizesRepositoryPages() throws {
     #expect(SiteContentExtraction.GitHub.isRepositoryPage(
