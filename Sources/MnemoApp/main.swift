@@ -1277,9 +1277,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         withObservationTracking {
             _ = UpdateCoordinator.shared.isWindowPresented
         } onChange: { [weak self] in
-            MainActor.assumeIsolated {
-                self?.observeUpdatePresentation()
-                self?.presentUpdateWindowIfNeeded()
+            // onChange 是 willSet 语义：它在属性**真正改变之前**同步触发。
+            // 原来用 MainActor.assumeIsolated 直接读，拿到的还是旧值 false，
+            // 于是"要显示窗口"这一次变化被读成"要关窗口"。挪到下一拍再读，
+            // 和下面专注时钟那处保持同一种写法。
+            Task { @MainActor in
+                guard let self else { return }
+                self.observeUpdatePresentation()
+                self.presentUpdateWindowIfNeeded()
             }
         }
     }

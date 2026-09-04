@@ -5354,8 +5354,15 @@ final class AppModel {
                 guard let action = self.contentIndexAction else { return }
                 let forceRefreshLink = self.forcedLinkRefreshIDs.contains(id)
                 let result = await action(item, forceRefreshLink)
+                let isManualRefresh = self.manualLinkRefreshIDs.contains(id)
                 if !result.completed && !result.waitingForEmbedding {
-                    self.showEdgeStatus(.indexingFailed)
+                    // 边缘警示灯是给**用户自己发起**的动作准备的（见拖入失败那处
+                    // 注释：收起态看不到 toast，得在刘海本体上有反馈）。后台自动
+                    // 补抓旧链接失败是常态——分享 token 过期、页面已删、站点限流，
+                    // 用户什么都没做却每次启动被闪一次黄边，那是误报不是反馈。
+                    if !forceRefreshLink || isManualRefresh {
+                        self.showEdgeStatus(.indexingFailed)
+                    }
                     if forceRefreshLink {
                         // 新版抓取失败，旧分块/向量仍原样保留。清掉本轮强制标记，
                         // 自动修复由下次启动按尝试次数再排；手动修复给出明确结果。

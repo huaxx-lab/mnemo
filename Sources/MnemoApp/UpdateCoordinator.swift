@@ -11,8 +11,16 @@ import SwiftUI
 /// 有意不用 Sparkle：它是给"有签名证书、有 appcast 服务"的应用准备的，
 /// 我们是 ad-hoc 签名 + GitHub release，一条 HTTPS 加一次 ditto 就够了，
 /// 引入框架只会让打包链路多一层要维护的东西。
+/// 用 Observation 而不是 Combine 的 ObservableObject。
+///
+/// 这两套观察机制不能混：`main.swift` 里用 `withObservationTracking` 观察
+/// `isWindowPresented`，而访问 `@Published` 属性**不会**注册到
+/// ObservationRegistrar，`onChange` 因此永不触发——`presentUpdateWindowIfNeeded()`
+/// 一次都没被调用过，窗口永远不出现。表现就是"点检查更新完全没反应"。
+/// 全应用（AppModel 等）都是 `@Observable`，这里跟上。
 @MainActor
-final class UpdateCoordinator: NSObject, ObservableObject {
+@Observable
+final class UpdateCoordinator: NSObject {
     enum Phase: Equatable {
         case idle
         case checking
@@ -23,15 +31,14 @@ final class UpdateCoordinator: NSObject, ObservableObject {
         case failed(String)
     }
 
-    @Published private(set) var phase: Phase = .idle
-    @Published var isWindowPresented = false
+    private(set) var phase: Phase = .idle
+    var isWindowPresented = false
 
-    private let repo = "huaxx-lab/mnemo"
-    private var downloadTask: URLSessionDownloadTask?
-    private var downloadSession: URLSession?
+    @ObservationIgnored private let repo = "huaxx-lab/mnemo"
+    @ObservationIgnored private var downloadTask: URLSessionDownloadTask?
+    @ObservationIgnored private var downloadSession: URLSession?
     /// 已发现但还没装的新版本。取消下载后回到这一步，不用重新检查。
-    private var lastAvailableRelease: ReleaseInfo?
-    private var lastCheckKey = "Pinland.update.lastCheck"
+    @ObservationIgnored private var lastAvailableRelease: ReleaseInfo?
 
     static let shared = UpdateCoordinator()
 
@@ -41,11 +48,9 @@ final class UpdateCoordinator: NSObject, ObservableObject {
         AppVersion(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0")
     }
 
-    /// 启动时静默检查：有更新才弹，没有就当没发生过。半天最多查一次。
+    /// 启动时静默检查：有更新才弹，没有就当没发生过。没有节流——用户要求
+    /// 每次启动都查一次，何况这次请求只是个 GitHub API，量小到无所谓。
     func checkOnLaunch() {
-        let defaults = UserDefaults.standard
-        if let last = defaults.object(forKey: lastCheckKey) as? Date,
-           Date.now.timeIntervalSince(last) < 12 * 3600 { return }
         Task { await check(silent: true) }
     }
 
@@ -56,25 +61,23 @@ final class UpdateCoordinator: NSObject, ObservableObject {
     }
 
     private func check(silent: Bool) async {
-        guard case .checking = phase, silent == false else {
-            phase = .checking
-            UserDefaults.standard.set(Date.now, forKey: lastCheckKey)
-            do {
-                let release = try await fetchLatestRelease()
-                if release.version > currentVersion {
-                    lastAvailableRelease = release
-                    phase = .available(release)
-                    isWindowPresented = true
-                } else {
-                    phase = .upToDate
-                    isWindowPresented = !silent
-                }
-            } catch {
-                // 静默检查失败不打扰：下次启动还会再来。手动检查要让人知道。
-                phase = silent ? .idle : .failed("检查更新失败：\(error.localizedDescription)")
+        // 正在查的时候重复点击直接忽略，避免同一次检查发两遍请求。
+        if case .checking = phase { return }
+        phase = .checking
+        do {
+            let release = try await fetchLatestRelease()
+            if release.version > currentVersion {
+                lastAvailableRelease = release
+                phase = .available(release)
+                isWindowPresented = true
+            } else {
+                phase = .upToDate
                 isWindowPresented = !silent
             }
-            return
+        } catch {
+            // 静默检查失败不打扰：下次启动还会再来。手动检查要让人知道。
+            phase = silent ? .idle : .failed("检查更新失败：\(error.localizedDescription)")
+            isWindowPresented = !silent
         }
     }
 

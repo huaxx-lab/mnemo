@@ -3,7 +3,8 @@ import SwiftUI
 
 /// 更新窗。四种状态同一张脸：图标和标题永远在上，底下只换"此刻该干什么"。
 struct UpdateWindow: View {
-    @ObservedObject private var coordinator = UpdateCoordinator.shared
+    // 协调器是 @Observable：直接读属性即可，SwiftUI 自己追踪依赖。
+    private var coordinator = UpdateCoordinator.shared
 
     var body: some View {
         VStack(spacing: 0) {
