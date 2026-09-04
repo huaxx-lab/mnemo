@@ -1256,9 +1256,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.title = "Mnemo 更新"
             window.titlebarAppearsTransparent = true
             window.isReleasedWhenClosed = false
-            window.center()
             window.contentView = NSHostingView(rootView: UpdateWindow())
-            window.isReleasedWhenClosed = false
+            // contentRect 只是初始值；标题栏会从里面挪走一条，正文顶端因此被
+            // 切掉一截。显式定内容区尺寸，再居中。
+            window.setContentSize(NSSize(width: 480, height: 520))
+            window.center()
             updateWindow = window
             // 用户点叉 = 只是收起窗口，不等于拒绝更新；状态保留在协调器里。
             NotificationCenter.default.addObserver(
@@ -1273,20 +1275,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateWindow?.makeKeyAndOrderFront(nil)
     }
 
+    /// 把"该开窗了"接到协调器上。
+    ///
+    /// 原来是 withObservationTracking 的一次性边沿监听，每响应一次都要重新
+    /// 武装；而关窗回调又会反过来改状态，一次点击引出好几拍重入，漏武装一次
+    /// 之后"检查更新"就永久没反应。现在由协调器直接回调，没有边沿可漏。
     private func observeUpdatePresentation() {
-        withObservationTracking {
-            _ = UpdateCoordinator.shared.isWindowPresented
-        } onChange: { [weak self] in
-            // onChange 是 willSet 语义：它在属性**真正改变之前**同步触发。
-            // 原来用 MainActor.assumeIsolated 直接读，拿到的还是旧值 false，
-            // 于是"要显示窗口"这一次变化被读成"要关窗口"。挪到下一拍再读，
-            // 和下面专注时钟那处保持同一种写法。
-            Task { @MainActor in
-                guard let self else { return }
-                self.observeUpdatePresentation()
-                self.presentUpdateWindowIfNeeded()
-            }
+        UpdateCoordinator.shared.presentationDidChange = { [weak self] in
+            self?.presentUpdateWindowIfNeeded()
         }
+        presentUpdateWindowIfNeeded()
     }
 
     private func completeOnboarding() {

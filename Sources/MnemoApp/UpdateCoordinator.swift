@@ -32,7 +32,25 @@ final class UpdateCoordinator: NSObject {
     }
 
     private(set) var phase: Phase = .idle
-    var isWindowPresented = false
+    private(set) var isWindowPresented = false
+
+    /// 谁负责真的开关那扇窗。
+    ///
+    /// 这里原来靠 `withObservationTracking` 在 AppDelegate 侧监听
+    /// `isWindowPresented`，但那是**一次性**的边沿触发：每次响应完都要重新
+    /// 武装，而 Observation 的 `onChange` 是 willSet 语义、且**不做相等性
+    /// 判断**（设成同一个值照样触发）。窗口关闭又会回头调 dismiss()，于是
+    /// 一次点击能引出好几拍重入，任何一拍武装失败，之后点"检查更新"就再也
+    /// 没有反应——这个 bug 在这个机制上已经复发两次了。
+    /// 改成直接回调：谁改状态谁负责通知，没有边沿、没有重新武装。
+    @ObservationIgnored var presentationDidChange: (() -> Void)?
+
+    /// 所有状态变更都从这里走，保证通知不会漏。
+    private func setPresented(_ value: Bool) {
+        guard isWindowPresented != value else { return }
+        isWindowPresented = value
+        presentationDidChange?()
+    }
 
     @ObservationIgnored private let repo = "huaxx-lab/mnemo"
     @ObservationIgnored private var downloadTask: URLSessionDownloadTask?
@@ -56,7 +74,10 @@ final class UpdateCoordinator: NSObject {
 
     /// 菜单里点"版本"：立即查，并且无论结果如何都给用户一个交代。
     func checkNow() {
+        // 窗口可能已经开着、只是被别的应用盖住了：点菜单就该把它端到前面，
+        // 所以这里不看当前值，直接要求呈现一次。
         isWindowPresented = true
+        presentationDidChange?()
         Task { await check(silent: false) }
     }
 
@@ -69,15 +90,15 @@ final class UpdateCoordinator: NSObject {
             if release.version > currentVersion {
                 lastAvailableRelease = release
                 phase = .available(release)
-                isWindowPresented = true
+                setPresented(true)
             } else {
                 phase = .upToDate
-                isWindowPresented = !silent
+                setPresented(!silent)
             }
         } catch {
             // 静默检查失败不打扰：下次启动还会再来。手动检查要让人知道。
             phase = silent ? .idle : .failed("检查更新失败：\(error.localizedDescription)")
-            isWindowPresented = !silent
+            setPresented(!silent)
         }
     }
 
@@ -93,7 +114,7 @@ final class UpdateCoordinator: NSObject {
 
     func dismiss() {
         // 下载中的关闭不是取消：窗口可以收起，下载继续。
-        isWindowPresented = false
+        setPresented(false)
     }
 
     func cancelDownload() {

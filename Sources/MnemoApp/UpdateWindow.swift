@@ -131,17 +131,18 @@ struct UpdateWindow: View {
             ScrollView {
                 MarkdownText(
                     raw: release.notes.isEmpty ? release.title : release.notes,
-                    font: .system(size: 12)
+                    font: .system(size: 13),
+                    palette: .window
                 )
                 .padding(.horizontal, 14)
                 .padding(.vertical, 12)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .frame(maxWidth: .infinity, minHeight: 150)
-            .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10))
+            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
             .overlay {
                 RoundedRectangle(cornerRadius: 10)
-                    .strokeBorder(.quaternary.opacity(0.6))
+                    .strokeBorder(Color(nsColor: .separatorColor))
             }
         }
         .padding(.horizontal, 22)
