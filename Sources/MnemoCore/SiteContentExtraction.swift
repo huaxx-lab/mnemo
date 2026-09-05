@@ -201,6 +201,29 @@ public enum SiteContentExtraction {
             return id.isEmpty ? nil : id
         }
 
+        /// 平台自己的前端静态资源，不是这条笔记的配图。
+        ///
+        /// 实测：分享链接的 `xsec_token` 失效、或这条笔记不再完全可见时，
+        /// 页面照样能给出真实的标题和正文（这部分对搜索引擎是公开的），
+        /// 但 `imageList` 里换成了
+        /// `picasso-static.xiaohongshu.com/fe-platform/….png`——一张 480×252
+        /// 的通用红底 logo。生产库里四条毫不相关的笔记，封面文件字节完全
+        /// 一致，就是同一张它。
+        ///
+        /// 危害不止是卡片显示成红方块：这张图会被当成"笔记真实配图"一路
+        /// 送进 OCR，于是 RAG 里多出 `小书` 这种从 logo 上认出来的碎字，
+        /// 既检索不到东西，又污染这条笔记的语义。
+        ///
+        /// 判据用「排除已证实的平台资源」而不是「只允许已知内容 CDN」：
+        /// 内容 CDN 的域名平台会换，写死白名单等于哪天悄悄全部失效；而
+        /// `fe-platform` 这个路径的语义（前端平台资源）本身就注定不会是
+        /// 用户发的图。
+        public static func isPlatformAsset(_ url: URL) -> Bool {
+            let host = (url.host() ?? "").lowercased()
+            if host.hasPrefix("picasso-static.") { return true }
+            return url.path.lowercased().contains("/fe-platform/")
+        }
+
         private static func imageURLs(from value: Any?, limit: Int) -> [URL] {
             guard limit > 0, let records = value as? [[String: Any]] else { return [] }
             var seen: Set<String> = []
@@ -215,7 +238,7 @@ public enum SiteContentExtraction {
                       var components = URLComponents(string: raw),
                       seen.insert(raw).inserted else { continue }
                 if components.scheme?.lowercased() == "http" { components.scheme = "https" }
-                guard let url = components.url else { continue }
+                guard let url = components.url, !isPlatformAsset(url) else { continue }
                 result.append(url)
                 if result.count >= limit { break }
             }
@@ -346,7 +369,8 @@ public enum SiteContentExtraction {
                let image = LinkTextExtraction.metaImageURL(html: html, baseURL: url) {
                 var components = URLComponents(url: image, resolvingAgainstBaseURL: true)
                 if components?.scheme?.lowercased() == "http" { components?.scheme = "https" }
-                if let resolved = components?.url { images = [resolved] }
+                // og:image 同样会在降级响应里变成平台 logo，判据和 imageList 共用一份。
+                if let resolved = components?.url, !isPlatformAsset(resolved) { images = [resolved] }
             }
             guard title != nil || !text.isEmpty || !images.isEmpty else { return nil }
             let lines = text.split(whereSeparator: \.isNewline)

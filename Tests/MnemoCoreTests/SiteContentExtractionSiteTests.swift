@@ -218,6 +218,51 @@ func xiaohongshuFallsBackToMetadata() throws {
     #expect(note.imageURLs.map(\.absoluteString) == ["https://img.example/fallback.jpg"])
 }
 
+@Test("小红书：imageList 里的平台占位图不能当成笔记配图")
+func xiaohongshuRejectsPlatformPlaceholderImage() throws {
+    // 分享链接的 token 失效时，页面照给真标题真正文，imageList 却换成了
+    // 平台前端静态资源里的通用 logo。这张图一旦被当成真配图，卡片会显示
+    // 成红方块，更要命的是它会被送进 OCR，在 RAG 里留下从 logo 上认出来
+    // 的碎字。
+    let html = """
+    <html><body><script>window.__INITIAL_STATE__={"note":{"noteDetailMap":{"target":{"note":
+    {"title":"真实笔记标题","desc":"真实正文","imageList":[
+    {"urlDefault":"https://picasso-static.xiaohongshu.com/fe-platform/abc123.png"}]}}}}}</script></body></html>
+    """
+    let url = try #require(URL(string: "https://www.xiaohongshu.com/explore/target"))
+    let note = try #require(SiteContentExtraction.Xiaohongshu.note(fromHTML: html, url: url))
+    #expect(note.title == "真实笔记标题", "正文和标题是真的，不能因为图假就整条丢掉")
+    #expect(note.text == "真实正文")
+    #expect(note.imageURLs.isEmpty, "占位图必须被剔掉，宁可没有封面也不要一张假的")
+}
+
+@Test("小红书：og:image 退回路径同样要挡掉平台占位图")
+func xiaohongshuRejectsPlaceholderFromMetaImage() throws {
+    let html = """
+    <html><head>
+      <title>真实标题 - 小红书</title>
+      <meta property="og:description" content="真实正文">
+      <meta property="og:image" content="https://picasso-static.xiaohongshu.com/fe-platform/logo.png">
+    </head><body><script>window.__INITIAL_STATE__={broken</script></body></html>
+    """
+    let url = try #require(URL(string: "https://www.xiaohongshu.com/explore/target"))
+    let note = try #require(SiteContentExtraction.Xiaohongshu.note(fromHTML: html, url: url))
+    #expect(note.title == "真实标题")
+    #expect(note.imageURLs.isEmpty)
+}
+
+@Test("小红书：内容 CDN 上的真实配图不受占位图判据影响")
+func xiaohongshuKeepsRealCDNImage() throws {
+    let html = """
+    <html><body><script>window.__INITIAL_STATE__={"note":{"noteDetailMap":{"target":{"note":
+    {"title":"标题","desc":"正文","imageList":[
+    {"urlDefault":"https://sns-webpic-qc.xhscdn.com/202609/abc/1040g2sg!nd_dft.jpg"}]}}}}}</script></body></html>
+    """
+    let url = try #require(URL(string: "https://www.xiaohongshu.com/explore/target"))
+    let note = try #require(SiteContentExtraction.Xiaohongshu.note(fromHTML: html, url: url))
+    #expect(note.imageURLs.count == 1, "判据只排除已证实的平台资源，不能误伤真配图")
+}
+
 @Test("小红书：正文只有一行时不分段，交给通用按字数切")
 func xiaohongshuSingleLineBodyHasNoSegments() throws {
     let html = """
