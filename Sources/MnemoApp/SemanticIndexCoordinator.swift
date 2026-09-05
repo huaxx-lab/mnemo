@@ -6,6 +6,9 @@ struct IndexingRunResult: Sendable {
     var dimensionChanged: Bool
     var waitingForEmbedding: Bool = false
     var autoRetryAfter: TimeInterval?
+    /// 索引器在这轮落了新封面。AppModel 用它只刷新对应那张卡的缩略图，
+    /// 不能指望一次 items reload 顺带重建 PinCard 的 @State thumbnail。
+    var coverChanged = false
 }
 
 /// 一条链接配图的 OCR 是否还是"当前那一次"。
@@ -144,6 +147,8 @@ enum SemanticIndexCoordinator {
         // 强制刷新时先取得 OCR 图源再索引，不能先读旧图、结束后才异步下载新图。
         let isXiaohongshu = LinkRefreshPolicy.isNote(item.linkURL)
         var refreshedImages = false
+        var xiaohongshuPageParsed = false
+        var coverChanged = false
         if isXiaohongshu,
            forceRefreshLink || LinkCoverStore.ocrSourceURLs(for: item.id).isEmpty,
            let url = item.linkURL {
@@ -152,6 +157,8 @@ enum SemanticIndexCoordinator {
                 return IndexingRunResult(completed: false, dimensionChanged: false)
             }
             refreshedImages = preview.hasImages
+            xiaohongshuPageParsed = preview.pageParsed
+            coverChanged = preview.coverChanged
             fetchedPageTitle = fetchedPageTitle ?? preview.title
         }
         // OCR 是这条链路里最贵的一步：一张图在本机跑 Vision 精确识别 + 分类，
@@ -277,17 +284,13 @@ enum SemanticIndexCoordinator {
             }
         }
 
-        // 任一远端分块尚未完成时，保留上一版分块和向量；下一次恢复队列后
-        // 从完整的新内容版本重新生成，避免新旧分块混合落盘。
-        if shouldRetry {
-            return IndexingRunResult(
-                completed: false,
-                dimensionChanged: dimensionChanged,
-                waitingForEmbedding: true,
-                autoRetryAfter: autoRetryAfter
-            )
-        }
-
+        // Embedding 是正文抓取之后的远端增强，不是“页面有没有解析成功”的
+        // 判据。旧代码一旦向量请求超时/断网，就在这里整轮返回，连已经抓好的
+        // 标题与 linkPage 也一起丢掉；生产库里的实证就是新小红书条目长期停在
+        // `www.xiaohongshu.com`、0 分块，同时 pendingIndexIDs 被另一条失败的
+        // Embedding 占着。下面无论向量是否成功都先原子落本地正文/标题；失败时
+        // 只把 vector/indexedAt 留空并保留队列稍后补，不再把“向量失败”伪装成
+        // “小红书解析失败”。
         do {
             // `item` 可能在抓网页的几秒里被元数据任务更新过。重新读当前版本，
             // 只把本轮索引负责的字段合并进去，避免用旧快照覆盖新标题/标签。
@@ -314,7 +317,10 @@ enum SemanticIndexCoordinator {
                 updated.titleOrigin = "page"
             }
 
-            if isXiaohongshu, forceRefreshLink, refreshedImages {
+            // “这一版结构化页面读成功了”才是迁移完成；配图 CDN 临时失败
+            // 不该让标题/正文成功的条目永远处在未迁移状态，也不能反过来因为
+            // 恰好下到了一张图就把登录墙/空壳标成成功。
+            if isXiaohongshu, forceRefreshLink, xiaohongshuPageParsed {
                 updated.linkExtractionVersion = LinkRefreshPolicy.xiaohongshuVersion
             }
             if let modelID,
@@ -324,14 +330,14 @@ enum SemanticIndexCoordinator {
                 updated.embeddingModelID = modelID
                 updated.indexedAt = indexedAt
                 updated.aiPrivacyBlocked = false
-            } else if privacyBlocked || embeddingUnconfigured {
-                // 新内容不能外发时，旧向量也不能继续代表当前内容；保留本地
-                // 全文/OCR 分块供关键词检索，并记录已处理的内容版本。
+            } else if privacyBlocked || embeddingUnconfigured || shouldRetry {
+                // 新内容不能外发/向量网络暂时失败时，旧向量也不能继续代表当前
+                // 内容；但本地全文必须现在落盘，关键词检索与页面标题立即可用。
                 updated.vector = nil
                 updated.contentHash = chunks.map(\.contentHash).joined(separator: ":")
                 updated.embeddingModelID = nil
-                // indexedAt 留空：这一版内容还没拿到向量。用户之后配好
-                // embedding，队列会凭它把这些条目重新捡回来。
+                // indexedAt 留空：这一版正文已解析，只是向量没完成。队列用
+                // waitingForEmbedding 留着，稍后只需重试增强，不影响当前可用性。
                 updated.indexedAt = nil
                 updated.aiPrivacyBlocked = privacyBlocked
             }
@@ -362,9 +368,13 @@ enum SemanticIndexCoordinator {
             }
         }
         return IndexingRunResult(
+            // 页面/本地内容已经完成落盘；`waitingForEmbedding` 单独告诉队列还要
+            // 补向量。两者不再互斥，否则上层不会 reload 已经可用的标题正文。
             completed: true,
             dimensionChanged: dimensionChanged,
-            waitingForEmbedding: false
+            waitingForEmbedding: shouldRetry,
+            autoRetryAfter: autoRetryAfter,
+            coverChanged: coverChanged
         )
     }
 

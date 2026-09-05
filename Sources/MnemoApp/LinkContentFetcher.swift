@@ -48,19 +48,17 @@ enum LinkContentFetcher {
                 return extracted
             }
         }
-        // 小红书：笔记全文在 __INITIAL_STATE__ 里，比被截断的 meta 完整。
+        // 小红书：标题、正文、配图都从同一条 noteDetailMap[id] 记录一次解出。
+        // 不再对同一份 HTML 独立扫三遍“第一个同名字段”——页面里还有推荐流、
+        // 评论等同名键，独立扫描迟早会串到别的记录。
         if LinkPlatform.resolve(url) == .xiaohongshu,
-           let note = SiteContentExtraction.Xiaohongshu.extract(fromHTML: html)
-                ?? SiteContentExtraction.Xiaohongshu.title(fromHTML: html) {
-            // 标题也从状态里取。<title> 在作者没填标题时会被整段正文顶替，
-            // 还带着 #话题# 和 " - 小红书" 后缀。
-            let title = SiteContentExtraction.Xiaohongshu.title(fromHTML: html)
-                ?? LinkTextExtraction.fromHTML(html, baseURL: url).title
+           let note = SiteContentExtraction.Xiaohongshu.note(fromHTML: html, url: url),
+           !note.text.isEmpty || note.title != nil {
             return LinkTextExtraction.Extracted(
-                title: title,
-                text: LinkTextExtraction.clamp(note),
+                title: note.title,
+                text: LinkTextExtraction.clamp(note.text.isEmpty ? note.title ?? "" : note.text),
                 // 清单体正文按作者换的行分段，分块不再把相邻条目拦腰切断。
-                segments: SiteContentExtraction.Xiaohongshu.bodySegments(fromHTML: html)
+                segments: note.segments
             )
         }
         // GitHub 仓库页：正文是文件树和导航，真正有检索价值的 README 在

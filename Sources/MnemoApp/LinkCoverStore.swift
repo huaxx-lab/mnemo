@@ -44,11 +44,20 @@ enum LinkCoverStore {
         }
     }
 
+    struct Preview {
+        var title: String?
+        var cover: NSImage?
+        var ocrImages: [NSImage]
+        /// 页面结构化状态真的取到了。图片下载失败不能反过来把“正文解析成功”
+        /// 抹成失败；调用方用它区分“没有图”与“整页都没解析出来”。
+        var pageParsed: Bool
+    }
+
     /// 抓标题与封面。两者都可能拿不到，各自独立。
     ///
     /// `ocrImages` 是检索用的**全分辨率**配图：卡片封面落盘前会缩到 240px，
     /// 而"信息写在图上"的配图恰恰需要看清小字——喂给 OCR 的不能是卡片尺寸。
-    static func fetch(for target: URL) async -> (title: String?, cover: NSImage?, ocrImages: [NSImage]) {
+    static func fetch(for target: URL) async -> Preview {
         let platform = LinkPlatform.resolve(target)
         let metadata: LPLinkMetadata?
         if platform == .xiaohongshu {
@@ -75,6 +84,7 @@ enum LinkCoverStore {
         var title = metadata?.title?.trimmingCharacters(in: .whitespacesAndNewlines)
         var cover: NSImage?
         var ocrImages: [NSImage] = []
+        var pageParsed = metadata != nil
 
         // 小红书必须先读 imageList：LPMetadataProvider / og:image 经常给的是
         // 平台静态 logo，不是这条笔记的配图。用户要求是「真实配图优先，拿不到
@@ -85,6 +95,7 @@ enum LinkCoverStore {
             title = note.title
             cover = note.images.first
             ocrImages = note.images
+            pageParsed = note.pageParsed
         }
         // 其他站点优先系统元数据；视频封面常在 videoProvider。
         if cover == nil, let source = metadata?.imageProvider ?? metadata?.videoProvider {
@@ -97,19 +108,28 @@ enum LinkCoverStore {
         // 不给 OCR——一张红色 logo 识别出的"文字"只会污染检索。
         if ocrImages.isEmpty, let cover { ocrImages = [cover] }
         if cover == nil { cover = await siteIcon(for: target) }
-        return (title.flatMap { $0.isEmpty ? nil : String($0.prefix(80)) }, cover, ocrImages)
+        return Preview(
+            title: title.flatMap { $0.isEmpty ? nil : String($0.prefix(80)) },
+            cover: cover,
+            ocrImages: ocrImages,
+            pageParsed: pageParsed
+        )
     }
 
-    static func refreshForIndex(_ target: URL, itemID: UUID) async -> (title: String?, hasImages: Bool) {
+    static func refreshForIndex(
+        _ target: URL, itemID: UUID
+    ) async -> (title: String?, hasImages: Bool, coverChanged: Bool, pageParsed: Bool) {
         let preview = await fetch(for: target)
-        guard !Task.isCancelled else { return (nil, false) }
-        if let cover = preview.cover { store(cover, for: itemID) }
+        guard !Task.isCancelled else { return (nil, false, false, false) }
+        let coverChanged = preview.cover.map { store($0, for: itemID) } ?? false
         let stored = !preview.ocrImages.isEmpty && storeOCRSources(preview.ocrImages, for: itemID)
-        return (preview.title, stored)
+        return (preview.title, stored, coverChanged, preview.pageParsed)
     }
 
     /// 小红书笔记的整单配图。抓一次 HTML，把 imageList 里前几张都取回来。
-    private static func noteImages(for target: URL) async -> (title: String?, images: [NSImage]) {
+    private static func noteImages(
+        for target: URL
+    ) async -> (title: String?, images: [NSImage], pageParsed: Bool) {
         var request = URLRequest(url: target, timeoutInterval: 10)
         request.setValue(
             "Mozilla/5.0 (Macintosh; Intel Mac OS X) Mnemo/1.0 (+link preview)",
@@ -120,19 +140,23 @@ enum LinkCoverStore {
               (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) == true,
               let html = String(data: data, encoding: .utf8)
                 ?? String(data: data, encoding: .init(rawValue: 0x80000632))
-        else { return (nil, []) }
+        else { return (nil, [], false) }
+        guard let note = SiteContentExtraction.Xiaohongshu.note(fromHTML: html, url: target) else {
+            return (nil, [], false)
+        }
         var images: [NSImage] = []
-        let noteTitle = SiteContentExtraction.Xiaohongshu.title(fromHTML: html)
-        for imageURL in SiteContentExtraction.Xiaohongshu.noteImageURLs(fromHTML: html) {
+        // 每张图独立成功：一张 CDN 图临时失败不应该把前面已经拿到的封面和
+        // OCR 图源全部丢掉，更不能把正文/标题“解析成功”降级成整页失败。
+        for imageURL in note.imageURLs {
             var imageRequest = URLRequest(url: imageURL, timeoutInterval: 10)
             imageRequest.setValue(target.absoluteString, forHTTPHeaderField: "Referer")
             guard let (imageData, imageResponse) = await loadData(imageRequest),
                   (imageResponse as? HTTPURLResponse)
                     .map({ (200..<300).contains($0.statusCode) }) == true,
-                  let image = NSImage(data: imageData), image.size.width > 0 else { return (noteTitle, []) }
+                  let image = NSImage(data: imageData), image.size.width > 0 else { continue }
             images.append(image)
         }
-        return (SiteContentExtraction.Xiaohongshu.title(fromHTML: html), images)
+        return (note.title, images, true)
     }
 
     @discardableResult

@@ -1726,6 +1726,15 @@ final class ProviderSettingsModel {
     /// 命名/分类的输入文本。内联文本直接用；图片/PDF/文件走提取钩子拿
     /// OCR、视觉标签或页块文本——只有"类型+文件名"时模型编不出有意义的标题。
     private func aiSourceText(for item: Item) async -> String {
+        // 对链接，holding 只是 URL / 分享文案，不是内容。以前内联分支先返回，
+        // 导致即便 linkPage 已经正确抓到，自动命名仍只看那串网址，生成
+        // “生活分享精选推荐”这类泛化标题，再把页面标题覆盖掉。链接必须先读
+        // 已落库的结构化正文；只有索引尚未完成时才退回 URL。
+        if item.kind == .link,
+           let extracted = await enrichmentContentProvider?(item),
+           !extracted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return String(extracted.prefix(6_000))
+        }
         if let text = inlineText(for: item) { return String(text.prefix(6_000)) }
         if let extracted = await enrichmentContentProvider?(item),
            !extracted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {

@@ -103,140 +103,74 @@ public enum SiteContentExtraction {
             return markers.reduce(0) { $0 + (text.contains($1) ? 1 : 0) } >= 2
         }
 
-        /// 笔记自己的配图，按笔记内顺序，最多前几张。
+        /// 从一份页面快照一次抽出目标笔记的标题、正文和所有配图。
         ///
-        /// og:image 在这里是**平台的静态资源**（fe-platform/…png），不是这条
-        /// 笔记的图——照它取，一排小红书卡片会长得一模一样。真正的图写在
-        /// `__INITIAL_STATE__` 的 imageList 里，路径用 / 转义过。
+        /// 优先解 `__INITIAL_STATE__` 的 JSON。这里不用“全页找第一个 title/desc/
+        /// imageList”：同一页还有推荐流、评论、登录态等模块，它们也会出现这些键，
+        /// 三个独立扫描器早晚会各自命中不同记录。现在先根据 URL 的 note id 定位
+        /// `noteDetailMap[id]`，没有 URL 才在恰好只有一条记录时安全回退。
         ///
-        /// 清单 / 攻略类笔记的内容分布在好几张图上，只取首图等于只索引了
-        /// 第一页。每条图片记录都带 `urlDefault`（WB_DFT 原图）；没有它的
-        /// 旧结构退回 infoList 里带 `nd_dft` 标记的地址，再不行才用扫到的
-        /// 第一张。上限之外的多余图不再抓：那已经是"整本相册"，不是正文。
-        public static func noteImageURLs(fromHTML html: String, limit: Int = 6) -> [URL] {
-            guard let section = imageListSection(in: html) else { return [] }
-            let primary = section.matches(
-                of: try! Regex(#""urlDefault"\s*:\s*"((?:[^"\\]|\\.)*)""#)
-            ).compactMap { $0.output[1].substring }
-            let raws: [Substring]
-            if !primary.isEmpty {
-                raws = primary
-            } else {
-                let all = section.matches(
-                    of: try! Regex(#""url"\s*:\s*"((?:[^"\\]|\\.)*)""#)
-                ).compactMap { $0.output[1].substring }
-                let fullSize = all.filter { $0.contains("nd_dft") }
-                raws = fullSize.isEmpty ? Array(all.prefix(1)) : fullSize
-            }
-            var seen: Set<String> = []
-            var result: [URL] = []
-            for raw in raws {
-                let unescaped = String(raw).replacingOccurrences(of: "\\u002F", with: "/")
-                guard !unescaped.isEmpty, seen.insert(unescaped).inserted,
-                      var components = URLComponents(string: unescaped) else { continue }
-                // 小红书状态里仍可能写 http CDN；同一个 CDN 支持 HTTPS，而 App
-                // Transport Security 会拒绝明文图片。主动升级，真实配图才不会静默失败。
-                if components.scheme?.lowercased() == "http" { components.scheme = "https" }
-                guard let url = components.url else { continue }
-                result.append(url)
-                if result.count >= limit { break }
-            }
-            return result
+        /// 页面状态是 JavaScript，不是严格 JSON，值里偶尔会出现裸 `undefined`。
+        /// 只在**字符串外**把它替换成 null，再交给 JSONSerialization；不能简单做
+        /// 全文 replace，否则作者正文里真的写了 “undefined” 也会被改坏。
+        public static func note(
+            fromHTML html: String,
+            url: URL? = nil,
+            imageLimit: Int = 6
+        ) -> XiaohongshuNoteExtraction? {
+            guard let state = initialStateJSON(in: html),
+                  let object = try? JSONSerialization.jsonObject(with: Data(state.utf8)),
+                  let root = object as? [String: Any],
+                  // 线上结构是 note.noteDetailMap；早期页面与已有归档样本把
+                  // noteDetailMap 直接放根上。两种都是平台真实出现过的结构，
+                  // 统一入口必须都认，不能为了“更严格”把旧页面全部判坏。
+                  let map = ((root["note"] as? [String: Any])?["noteDetailMap"]
+                        ?? root["noteDetailMap"]) as? [String: Any],
+                  let record = selectedRecord(in: map, url: url),
+                  let rawNote = record["note"] as? [String: Any]
+            else { return fallbackNote(fromHTML: html, url: url, imageLimit: imageLimit) }
+
+            let body = cleaned(rawNote["desc"] as? String ?? "")
+            let authoredTitle = cleaned(rawNote["title"] as? String ?? "")
+            let resolvedTitle = authoredTitle.isEmpty ? leadingSentence(of: body) : authoredTitle
+            let images = imageURLs(from: rawNote["imageList"], limit: imageLimit)
+            let lines = body
+                .split(whereSeparator: \.isNewline)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            return XiaohongshuNoteExtraction(
+                title: resolvedTitle,
+                text: body,
+                imageURLs: images,
+                segments: lines.count > 1 ? lines : nil
+            )
         }
 
-        /// 首图。卡片封面和单图兜底用它；检索用上面的全量版本。
+        /// 兼容原有调用方的窄出口。新代码应优先调用 `note(fromHTML:url:)`，避免
+        /// 同一份 HTML 被解三遍；这些出口保留给核心层行为测试和简单调用。
+        public static func noteImageURLs(fromHTML html: String, limit: Int = 6) -> [URL] {
+            note(fromHTML: html, imageLimit: limit)?.imageURLs ?? []
+        }
+
         public static func noteImageURL(fromHTML html: String) -> URL? {
             noteImageURLs(fromHTML: html, limit: 1).first
         }
 
-        /// imageList 数组的原文。
-        ///
-        /// 只在 `__INITIAL_STATE__` 里找，且用括号配对界定数组边界——数组元素
-        /// 是嵌套对象、字符串里带转义，"找下一个 `]`"会在第一个元素上就收错尾。
-        private static func imageListSection(in html: String) -> Substring? {
-            guard html.contains("__INITIAL_STATE__") else { return nil }
-            // 从 noteDetailMap 之后找：页面状态里还有搜索、推荐流等模块，同名字段
-            // 属于别的笔记，拿全页第一个会把别人的图当成这条笔记的。
-            let searchStart = html.range(of: "\"noteDetailMap\"")?.lowerBound ?? html.startIndex
-            guard let keyRange = html.range(
-                of: "\"imageList\"", range: searchStart..<html.endIndex
-            ) else { return nil }
-            var index = keyRange.upperBound
-            while index < html.endIndex, html[index] != "[" {
-                // 键后面跟的不是数组，说明页面结构变了，不要硬解析。
-                guard html[index].isWhitespace || html[index] == ":" else { return nil }
-                index = html.index(after: index)
-            }
-            guard index < html.endIndex else { return nil }
-            let start = index
-            var depth = 0
-            var inString = false
-            var escaped = false
-            while index < html.endIndex {
-                let character = html[index]
-                if inString {
-                    if escaped { escaped = false } else if character == "\\" { escaped = true }
-                    else if character == "\"" { inString = false }
-                } else {
-                    switch character {
-                    case "\"": inString = true
-                    case "[": depth += 1
-                    case "]":
-                        depth -= 1
-                        if depth == 0 { return html[start...index] }
-                    default: break
-                    }
-                }
-                index = html.index(after: index)
-                // 一条笔记的图单不会有这么长，越界说明匹配到的不是我们要的字段。
-                if html.distance(from: start, to: index) > 60_000 { return nil }
-            }
-            return nil
+        public static func title(fromHTML html: String) -> String? {
+            note(fromHTML: html)?.title
         }
 
-
-        /// 读 `noteDetailMap` 之后第一个指定字段的 JSON 字符串值。
-        ///
-        /// 只在 noteDetailMap 后面找：页面状态里还有 UI、推荐流等一堆同名字段，
-        /// 拿全页第一个会把别的模块说明当成当前笔记的内容。手工扫到配对的
-        /// 引号，因为 JSON 字符串里可以有转义引号，不能直接找下一个 `"`。
-        static func noteField(_ key: String, in html: String) -> String? {
-            guard html.contains("__INITIAL_STATE__"),
-                  let noteRange = html.range(of: "\"noteDetailMap\"") else { return nil }
-            let noteState = html[noteRange.lowerBound...]
-            guard let range = noteState.range(
-                of: "\"\(key)\"\\s*:\\s*\"",
-                options: .regularExpression
-            ) else { return nil }
-            var literal = "\""
-            var index = range.upperBound
-            var escaped = false
-            while index < html.endIndex {
-                let character = html[index]
-                literal.append(character)
-                if escaped {
-                    escaped = false
-                } else if character == "\\" {
-                    escaped = true
-                } else if character == "\"" {
-                    break
-                }
-                index = html.index(after: index)
-                // 一条笔记不会有这么长，越界说明匹配到的不是我们要的字段。
-                if literal.count > 20_000 { return nil }
-            }
-            guard literal.hasSuffix("\""),
-                  let data = literal.data(using: .utf8),
-                  let decoded = try? JSONDecoder().decode(String.self, from: data) else {
-                return nil
-            }
-            let text = decoded.trimmingCharacters(in: .whitespacesAndNewlines)
+        public static func extract(fromHTML html: String) -> String? {
+            let text = note(fromHTML: html)?.text ?? ""
             return text.isEmpty ? nil : text
         }
 
-        /// 话题标记。原文写作 `#考研人[话题]#`，`[话题]#` 是平台的内部记号，
-        /// 不是用户写的字。留着它检索时会把这四个字当成正文词一起匹配，
-        /// 而且读起来是坏的。词本身保留——那是这条笔记的主题。
+        public static func bodySegments(fromHTML html: String) -> [String]? {
+            note(fromHTML: html)?.segments
+        }
+
+        /// 话题标记。原文写作 `#考研人[话题]#`，`[话题]#` 是平台内部记号，
+        /// 不是作者正文。词本身保留，平台记号去掉。
         public static func cleaned(_ text: String) -> String {
             text.replacingOccurrences(
                 of: #"\[话题\]#"#,
@@ -247,25 +181,170 @@ public enum SiteContentExtraction {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
-        /// 笔记标题。
-        ///
-        /// 状态里的 `title` 才是作者填的标题；`<title>` 标签在没填标题时会被
-        /// 整段正文顶替（还带着 `#话题#` 和 ` - 小红书` 后缀），拿它当标题
-        /// 就是一张卡片上糊着一整段话，或者干脆退化成 AI 起名。
-        /// 作者没填标题时（小红书允许），按平台自己的做法取正文首句。
-        public static func title(fromHTML html: String) -> String? {
-            if let title = noteField("title", in: html) {
-                let cleanedTitle = cleaned(title)
-                if !cleanedTitle.isEmpty { return cleanedTitle }
+        private static func selectedRecord(
+            in map: [String: Any],
+            url: URL?
+        ) -> [String: Any]? {
+            if let id = noteID(from: url), let record = map[id] as? [String: Any] {
+                return record
             }
-            guard let desc = extract(fromHTML: html) else { return nil }
-            return leadingSentence(of: desc)
+            guard map.count == 1 else { return nil }
+            return map.values.first as? [String: Any]
         }
 
-        /// 正文首句，用作没有标题时的替代。
-        ///
-        /// 按句子边界断，不按字数硬切——切在半个词上比长一点更难看。
-        /// 只有首句本身异常长时才退回在标点处收尾。
+        private static func noteID(from url: URL?) -> String? {
+            guard let url else { return nil }
+            let parts = url.pathComponents.filter { $0 != "/" }
+            guard let marker = parts.firstIndex(where: { $0 == "explore" || $0 == "discovery" }),
+                  parts.indices.contains(marker + 1) else { return nil }
+            let id = parts[marker + 1].trimmingCharacters(in: .whitespacesAndNewlines)
+            return id.isEmpty ? nil : id
+        }
+
+        private static func imageURLs(from value: Any?, limit: Int) -> [URL] {
+            guard limit > 0, let records = value as? [[String: Any]] else { return [] }
+            var seen: Set<String> = []
+            var result: [URL] = []
+            for record in records {
+                let info = record["infoList"] as? [[String: Any]] ?? []
+                let raw = (record["urlDefault"] as? String)
+                    ?? info.first(where: { ($0["imageScene"] as? String) == "WB_DFT" })?["url"] as? String
+                    ?? (record["url"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                    ?? info.compactMap { $0["url"] as? String }.first
+                guard let raw, !raw.isEmpty,
+                      var components = URLComponents(string: raw),
+                      seen.insert(raw).inserted else { continue }
+                if components.scheme?.lowercased() == "http" { components.scheme = "https" }
+                guard let url = components.url else { continue }
+                result.append(url)
+                if result.count >= limit { break }
+            }
+            return result
+        }
+
+        private static func initialStateJSON(in html: String) -> String? {
+            guard let marker = html.range(of: "__INITIAL_STATE__") else { return nil }
+            var index = marker.upperBound
+            while index < html.endIndex, html[index] != "=" { index = html.index(after: index) }
+            guard index < html.endIndex else { return nil }
+            index = html.index(after: index)
+            while index < html.endIndex, html[index].isWhitespace { index = html.index(after: index) }
+            guard index < html.endIndex, html[index] == "{" else { return nil }
+
+            let start = index
+            var depth = 0
+            var inString = false
+            var escaped = false
+            while index < html.endIndex {
+                let character = html[index]
+                if inString {
+                    if escaped { escaped = false }
+                    else if character == "\\" { escaped = true }
+                    else if character == "\"" { inString = false }
+                } else {
+                    switch character {
+                    case "\"": inString = true
+                    case "{": depth += 1
+                    case "}":
+                        depth -= 1
+                        if depth == 0 {
+                            let literal = String(html[start...index])
+                            return replacingUndefinedOutsideStrings(in: literal)
+                        }
+                    default: break
+                    }
+                }
+                index = html.index(after: index)
+            }
+            return nil
+        }
+
+        private static func replacingUndefinedOutsideStrings(in text: String) -> String {
+            var result = ""
+            var index = text.startIndex
+            var inString = false
+            var escaped = false
+            while index < text.endIndex {
+                let character = text[index]
+                if inString {
+                    result.append(character)
+                    if escaped { escaped = false }
+                    else if character == "\\" { escaped = true }
+                    else if character == "\"" { inString = false }
+                    index = text.index(after: index)
+                    continue
+                }
+                if character == "\"" {
+                    inString = true
+                    result.append(character)
+                    index = text.index(after: index)
+                    continue
+                }
+                let previous = index > text.startIndex ? text[text.index(before: index)] : nil
+                let afterUndefined = text.index(index, offsetBy: "undefined".count, limitedBy: text.endIndex)
+                let next = afterUndefined.flatMap { $0 < text.endIndex ? text[$0] : nil }
+                let isIdentifier: (Character?) -> Bool = { character in
+                    character.map { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "$" } ?? false
+                }
+                if text[index...].hasPrefix("undefined"),
+                   !isIdentifier(previous), !isIdentifier(next),
+                   let afterUndefined {
+                    result.append("null")
+                    index = afterUndefined
+                } else {
+                    result.append(character)
+                    index = text.index(after: index)
+                }
+            }
+            return result
+        }
+
+        /// 极少数页面把状态拆成平台暂时无法解码的 JS 表达式时，用 JSON-LD / meta
+        /// 保住标题、正文、首图。这个兜底不扫 DOM 登录框，不会把登录墙写进 RAG。
+        private static func fallbackNote(
+            fromHTML html: String,
+            url: URL?,
+            imageLimit: Int
+        ) -> XiaohongshuNoteExtraction? {
+            guard let document = try? SwiftSoup.parse(html, url?.absoluteString ?? "") else { return nil }
+            let title = (try? document.select("meta[property=og:title]").first()?.attr("content"))
+                .flatMap(titleFromDocumentTitle)
+                ?? (try? document.title()).flatMap(titleFromDocumentTitle)
+            let text = [
+                try? document.select("meta[property=og:description]").first()?.attr("content"),
+                try? document.select("meta[name=description]").first()?.attr("content"),
+            ].compactMap { $0 }
+                .map(cleaned)
+                .first(where: { !$0.isEmpty && !isLoginWall($0) }) ?? ""
+            var images: [URL] = []
+            if imageLimit > 0,
+               let image = LinkTextExtraction.metaImageURL(html: html, baseURL: url) {
+                var components = URLComponents(url: image, resolvingAgainstBaseURL: true)
+                if components?.scheme?.lowercased() == "http" { components?.scheme = "https" }
+                if let resolved = components?.url { images = [resolved] }
+            }
+            guard title != nil || !text.isEmpty || !images.isEmpty else { return nil }
+            let lines = text.split(whereSeparator: \.isNewline)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            return XiaohongshuNoteExtraction(
+                title: title ?? leadingSentence(of: text),
+                text: text,
+                imageURLs: Array(images.prefix(imageLimit)),
+                segments: lines.count > 1 ? lines : nil
+            )
+        }
+
+        private static func titleFromDocumentTitle(_ raw: String) -> String? {
+            var value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            for suffix in [" - 小红书", " | 小红书", " · 小红书"] where value.hasSuffix(suffix) {
+                value.removeLast(suffix.count)
+            }
+            value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return value.isEmpty ? nil : value
+        }
+
+        /// 正文首句，用作作者没有填标题时的替代。
         static func leadingSentence(of text: String) -> String? {
             guard let line = text
                 .split(whereSeparator: \.isNewline)
@@ -280,24 +359,6 @@ public enum SiteContentExtraction {
                 return String(head[..<cut])
             }
             return String(head)
-        }
-
-        public static func extract(fromHTML html: String) -> String? {
-            noteField("desc", in: html).map(cleaned)
-        }
-
-        /// 正文按作者自己换的行分段，让分块沿语义边界走。
-        ///
-        /// 小红书笔记大量是清单体（"1.…\n2.…\n3.…"），按字数硬切会把相邻条目
-        /// 拦腰切断——召回片段带着半句话，向量和证据都受损。只有一行时不分段，
-        /// 交给通用的按字数切。
-        public static func bodySegments(fromHTML html: String) -> [String]? {
-            guard let body = extract(fromHTML: html) else { return nil }
-            let lines = body
-                .split(whereSeparator: \.isNewline)
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-                .filter { !$0.isEmpty }
-            return lines.count > 1 ? lines : nil
         }
     }
 

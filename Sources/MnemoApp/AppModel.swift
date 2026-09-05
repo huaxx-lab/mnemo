@@ -5135,9 +5135,17 @@ final class AppModel {
                     if chunks.isEmpty { continue }
                     if item.kind == .link, !chunks.contains(where: { $0.source == .linkPage }) { continue }
                 }
+                // 页面标题是链接的权威名字；对已经拿到 page title 的链接，后续
+                // AI 只需要分类/打标签，不再生成第二个标题。否则一个路由同时做
+                // “命名+分类”时，模型仍会拿正文概括一个泛化标题，虽然写回层会
+                // 拦住，但请求本身是白花的，也让失败队列更长。
+                var enrichmentInput = item
+                if item.kind == .link, item.titleOrigin == "page" {
+                    enrichmentInput.titledLocally = false
+                }
                 self.activeAIItemID = id
                 let trace = PerformanceTrace.begin("AIEnrichment")
-                let enrichment = await action(item)
+                let enrichment = await action(enrichmentInput)
                 PerformanceTrace.end("AIEnrichment", id: trace)
                 guard !Task.isCancelled else { return }
                 guard let enrichment,
@@ -5146,7 +5154,12 @@ final class AppModel {
                       current.holding == item.holding else { continue }
 
                 if enrichment.didGenerateTitle, current.title == item.title,
-                   current.titledLocally, current.titleOrigin != "user" {
+                   current.titledLocally, current.titleOrigin != "user",
+                   // 网页自己的标题比模型根据正文概括的标题更有权威。索引与 AI
+                   // 并发时，页面标题可能刚在模型请求期间落库；`current.title ==
+                   // item.title` 已挡住这种竞态。这里再挡住已经明确标为 page 的
+                   // 条目，保证“重新跑 AI 分类”也不会把真标题改回泛化文案。
+                   current.titleOrigin != "page" {
                     current.title = enrichment.title
                     current.titledLocally = false
                     current.titleOrigin = "ai"
@@ -5278,6 +5291,13 @@ final class AppModel {
                 guard let action = self.contentIndexAction else { return }
                 let forceRefreshLink = self.forcedLinkRefreshIDs.contains(id)
                 let result = await action(item, forceRefreshLink)
+                if result.coverChanged {
+                    // 索引器直接写了小红书封面文件；PinCard 的 thumbnail 是 @State，
+                    // 单纯 reload items 不会让它重读磁盘。逐条 bump 代次，让刚完成
+                    // 的这一张立刻从域名色块（X）切成真实封面，而不是等用户切页、
+                    // 滚出视口再回来才“突然解析好”。
+                    self.linkCoverGenerations[id, default: 0] &+= 1
+                }
                 // action(...) 内部一路都在 await（网络请求、Embedding）。取消可能发生
                 // 在这些 await 期间——最常见的就是用户又点了一次"重新解析"：
                 // reparseLink 会先取消当前整条队列任务再重排。循环顶部的
@@ -5320,7 +5340,11 @@ final class AppModel {
                     }
                     self.persistIndexQueue()
                 }
-                if result.completed && !result.waitingForEmbedding {
+                if result.completed {
+                    // completed 现在表示“本地正文/标题已原子落盘”；向量网络失败
+                    // 会同时带 waitingForEmbedding=true。手动刷新到这里已经成功，
+                    // 必须立刻更新标题并反馈成功，不能继续把它显示成解析失败；
+                    // 只有队列项暂时保留，等 scheduleIndexRetry 补向量。
                     let wasForced = self.forcedLinkRefreshIDs.remove(id) != nil
                     let wasManual = self.manualLinkRefreshIDs.remove(id) != nil
                     self.persistForcedLinkRefreshes()
@@ -5328,20 +5352,11 @@ final class AppModel {
                         self.persistKnownInvalidLinkPages()
                     }
                     if wasManual {
-                        // 用户自己按的重新解析：清零，让后续自动补抓仍有额度。
                         self.clearLinkReparseAttempt(id)
                     } else if wasForced {
-                        // 自动补抓**成功**了——这一版解析器对这条链接的结果就是
-                        // 这样。可"最长段落 < 120 字"这条启发式判的是"看着像没
-                        // 抓到正文"，控制台页、定价页、视频页本来就没有长段落，
-                        // 抓成功后依旧满足它。原来在这里清零计数，于是下次开机
-                        // 同一批链接又被选中：绿点每次开机都转一圈，抓的全是已经
-                        // 抓好的页面，"每条最多试三次"对成功的条目从未生效。
-                        // 记满次数把它摘出候选，等 linkExtractionRevision 变了
-                        // 整表清空时再统一重来。
                         self.saturateLinkReparseAttempt(id)
                     }
-                    self.removePendingIndex(id)
+                    if !result.waitingForEmbedding { self.removePendingIndex(id) }
                     if wasForced, let refreshed = try? await self.library.item(id: id),
                        !LinkRefreshPolicy.isNote(refreshed.linkURL) {
                         // 正文先成功，再抓封面。取消同 ID 可能还在排队的旧元数据
@@ -5543,7 +5558,7 @@ final class AppModel {
         let links = items.filter { $0.kind == .link && shouldProcessContent($0) }
         guard !links.isEmpty else { return }
         // 单独记迁移额度，不重置普通链接的失败计数，避免重现每次启动补抓循环。
-        let migrationKey = "Pinland.xhsMigration.v5.attempts"
+        let migrationKey = "Pinland.xhsMigration.v6.attempts"
         var migrationAttempts = defaults.dictionary(forKey: migrationKey) as? [String: Int] ?? [:]
         let migrating = links.filter {
             LinkRefreshPolicy.needsMigration($0) && migrationAttempts[$0.id.uuidString, default: 0] < 3

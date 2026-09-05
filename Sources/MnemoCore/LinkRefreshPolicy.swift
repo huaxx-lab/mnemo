@@ -1,7 +1,7 @@
 import Foundation
 
 public enum LinkRefreshPolicy {
-    public static let xiaohongshuVersion = 5
+    public static let xiaohongshuVersion = 6
 
     public static func isNote(_ url: URL?) -> Bool {
         guard let url, LinkPlatform.resolve(url) == .xiaohongshu else { return false }

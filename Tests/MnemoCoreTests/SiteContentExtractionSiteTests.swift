@@ -20,6 +20,49 @@ func xiaohongshuUsesAuthoredTitle() throws {
     #expect(SiteContentExtraction.Xiaohongshu.title(fromHTML: html) == "9.4 美团ai应用一面")
 }
 
+@Test("小红书：用户实报页面完整回归——标题、短正文、首图一次绑定")
+func xiaohongshuReportedLivePageExtractsCompletely() throws {
+    let html = try fixture("xhs-live-6a9a466c")
+    let url = try #require(URL(string:
+        "https://www.xiaohongshu.com/explore/6a9a466c00000000270147fc?xsec_token=sample"
+    ))
+    let note = try #require(SiteContentExtraction.Xiaohongshu.note(fromHTML: html, url: url))
+    #expect(note.title == "已经可以全面兼容codex micro 了")
+    #expect(note.text == "外设和按键刚刚够，真是天意巧合")
+    #expect(note.imageURLs.count == 1)
+    #expect(note.imageURLs[0].scheme == "https")
+    #expect(note.imageURLs[0].absoluteString.contains("1040g3k0324mb7kqvga005q3efga3drut1kim4o8"))
+}
+
+@Test("小红书：按 URL 的 note id 绑定同一条记录，不会串到推荐流的同名字段")
+func xiaohongshuSelectsTheRequestedNoteRecord() throws {
+    let html = """
+    <html><body><script>window.__INITIAL_STATE__={"note":{"noteDetailMap":{
+      "wrong":{"note":{"title":"推荐流标题","desc":"推荐流正文","imageList":[{"urlDefault":"http://img.example/wrong.jpg"}]}},
+      "target":{"note":{"title":"目标标题","desc":"目标正文\\n第二行","imageList":[{"urlDefault":"http://img.example/target.jpg"}]}}
+    }},"noise":{"title":"外层噪音","desc":"外层正文","imageList":[]}}</script></body></html>
+    """
+    let url = try #require(URL(string: "https://www.xiaohongshu.com/explore/target?xsec_token=abc"))
+    let note = try #require(SiteContentExtraction.Xiaohongshu.note(fromHTML: html, url: url))
+    #expect(note.title == "目标标题")
+    #expect(note.text == "目标正文\n第二行")
+    #expect(note.imageURLs.map(\.absoluteString) == ["https://img.example/target.jpg"])
+    #expect(note.segments == ["目标正文", "第二行"])
+}
+
+@Test("小红书：状态里的裸 undefined 只在 JSON 字符串外替换")
+func xiaohongshuHandlesJavaScriptUndefinedWithoutChangingAuthoredText() throws {
+    let html = """
+    <script>window.__INITIAL_STATE__={"note":{"noteDetailMap":{"target":{"note":{
+      "title":"undefined 不是空值","desc":"正文也可以写 undefined","imageList":[],"extra":undefined
+    }}}}}</script>
+    """
+    let url = try #require(URL(string: "https://www.xiaohongshu.com/explore/target"))
+    let note = try #require(SiteContentExtraction.Xiaohongshu.note(fromHTML: html, url: url))
+    #expect(note.title == "undefined 不是空值")
+    #expect(note.text == "正文也可以写 undefined")
+}
+
 @Test("小红书：作者没填标题时取正文首句，而不是把整段正文当标题")
 func xiaohongshuFallsBackToLeadingSentence() throws {
     let html = try fixture("xhs-without-title")
@@ -108,6 +151,22 @@ func xiaohongshuListsAllNoteImages() throws {
     }
     // 首图接口与全量接口必须指向同一张图。
     #expect(SiteContentExtraction.Xiaohongshu.noteImageURL(fromHTML: html) == urls.first)
+}
+
+@Test("小红书：结构化状态坏掉时从 JSON-LD/meta 保住标题、正文和首图")
+func xiaohongshuFallsBackToMetadata() throws {
+    let html = """
+    <html><head>
+      <title>元数据标题 - 小红书</title>
+      <meta property="og:description" content="元数据正文">
+      <meta property="og:image" content="http://img.example/fallback.jpg">
+    </head><body><script>window.__INITIAL_STATE__={broken</script></body></html>
+    """
+    let url = try #require(URL(string: "https://www.xiaohongshu.com/explore/target"))
+    let note = try #require(SiteContentExtraction.Xiaohongshu.note(fromHTML: html, url: url))
+    #expect(note.title == "元数据标题")
+    #expect(note.text == "元数据正文")
+    #expect(note.imageURLs.map(\.absoluteString) == ["https://img.example/fallback.jpg"])
 }
 
 @Test("小红书：正文只有一行时不分段，交给通用按字数切")
