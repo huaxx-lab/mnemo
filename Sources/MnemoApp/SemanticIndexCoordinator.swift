@@ -318,6 +318,16 @@ enum SemanticIndexCoordinator {
                SiteContentExtraction.Xiaohongshu.isGenericSiteTitle(candidate) {
                 fetchedPageTitle = nil
             }
+            // 同一道闸的通用版：`Loading...` 这类是纯前端框架页在正文还没渲染
+            // 出来时的空壳标题，任何站点都可能给。判据本来就有，但此前只用在
+            // "这条以后要补抓"的筛选上——先写进去、再指望下次补抓修好，中间
+            // 这段时间用户看到的就是一张写着 Loading... 的卡片（生产库里
+            // IEEE 投稿后台那条至今如此）。在写盘前直接拒掉，宁可留着原来的
+            // 本地名字，也不写一个明显没意义的。
+            if let candidate = fetchedPageTitle,
+               LinkTextExtraction.isFailurePlaceholderTitle(candidate) {
+                fetchedPageTitle = nil
+            }
             if LinkRefreshPolicy.mayReplaceTitle(updated),
                let title = fetchedPageTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
                !title.isEmpty, title != updated.title {

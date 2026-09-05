@@ -5462,7 +5462,7 @@ final class AppModel {
     private static let linkExtractionRevisionKey = "Pinland.linkExtractionRevision"
     /// 每次结构化抽取规则有实质升级就递增。升级后旧失败次数作废，所有用户的
     /// 老卡自动获得新规则的重试机会；不再靠开发机手工 `defaults delete`。
-    private static let linkExtractionRevision = 4
+    private static let linkExtractionRevision = 5
     /// 同一条最多补抓几次。抓不到的链接确实存在（付费墙、已删除、纯视频），
     /// 不能每次开机都去骚扰人家；但也不能一次失败就永久放弃。
     private static let linkReparseMaxAttempts = 3
@@ -5575,7 +5575,7 @@ final class AppModel {
         let links = items.filter { $0.kind == .link && shouldProcessContent($0) }
         guard !links.isEmpty else { return }
         // 单独记迁移额度，不重置普通链接的失败计数，避免重现每次启动补抓循环。
-        let migrationKey = "Pinland.xhsMigration.v7.attempts"
+        let migrationKey = "Pinland.xhsMigration.v8.attempts"
         var migrationAttempts = defaults.dictionary(forKey: migrationKey) as? [String: Int] ?? [:]
         let migrating = links.filter {
             LinkRefreshPolicy.needsMigration($0) && migrationAttempts[$0.id.uuidString, default: 0] < 3

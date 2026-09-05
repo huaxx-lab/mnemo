@@ -5,7 +5,12 @@ public enum LinkRefreshPolicy {
     // 写回"的问题。少数条目在 v6 那次迁移里恰好撞上这种响应，标题被顶成了
     // 网站自己的标语——版本号必须再前进一格，让它们重新成为迁移候选，
     // 不用等用户逐条手动点"重新解析"。
-    public static let xiaohongshuVersion = 7
+    // v7→v8：修了"平台占位图（fe-platform 下的通用红底 logo）被当成笔记真实
+    // 配图"的问题。它不只把卡片显示成红方块，还被一路送进 OCR——生产库里
+    // 878/967/968 三条的 imageOCR 分块内容都是从 logo 上认出来的 `小书`，
+    // 这些碎字至今留在 RAG 里。版本号前进一格，让这些条目重新成为迁移候选，
+    // 抓不到真图时至少把假图和它带来的脏分块清掉。
+    public static let xiaohongshuVersion = 8
 
     public static func isNote(_ url: URL?) -> Bool {
         guard let url, LinkPlatform.resolve(url) == .xiaohongshu else { return false }
