@@ -34,8 +34,9 @@
 ## Highlights
 
 - **Just drop it on the notch.** Links, screenshots, PDFs, Word docs, chat messages — drag them to the top of the screen and they're stashed. Anything you copy lands in a temporary lane too.
+- **Everything you drop in actually gets read.** It's not just filed away — links fetch their page content, PDFs and Office docs get their full text indexed, screenshots get OCR'd. All of it goes into your library, so later you can just ask "what did that article say?" and get an answer.
 - **Your iPhone's clipboard shows up on your Mac.** Copy text or a screenshot on your phone, and it's already waiting in the notch. Nothing to set up, nothing to press.
-- **Ask for things the way you'd ask a person.** "Where's my Aliyun API key?" "The latest version of that RDMA paper" — type it into the search box and get the answer along with the file it came from. Everything you stash is read first: screenshots get OCR'd, PDFs and Office docs get their full text indexed, links fetch their page content.
+- **Ask for things the way you'd ask a person.** "Where's my Aliyun API key?" "The latest version of that RDMA paper" — type it into the search box and get the answer along with the file it came from.
 - **⌘G answers in place.** Select text in any app and hit ⌘G. It answers using your library — and if your cursor is sitting in a text field, the answer streams in right there, character by character. No window switching.
 - **Todos recognize themselves.** Pickup codes, package codes, schedule notices in chat screenshots — they turn into reminders on their own, and fire in the notch when it's time.
 - **Versions of the same file stack themselves.** Even when the filenames look nothing alike, revisions of one document fold into a single accordion card, newest first.
