@@ -57,7 +57,10 @@ enum LinkCoverStore {
     ///
     /// `ocrImages` 是检索用的**全分辨率**配图：卡片封面落盘前会缩到 240px，
     /// 而"信息写在图上"的配图恰恰需要看清小字——喂给 OCR 的不能是卡片尺寸。
-    static func fetch(for target: URL) async -> Preview {
+    /// - Parameter onCoverReady: 首图一下载完就回调，**先于**其余配图继续下载。
+    ///   笔记可以有六张图，全部下完再落封面的话，卡片要多等好几个来回才从
+    ///   占位块变成真图——而封面只依赖第一张。拿到就用，剩下的慢慢补。
+    static func fetch(for target: URL, onCoverReady: ((NSImage) -> Void)? = nil) async -> Preview {
         let platform = LinkPlatform.resolve(target)
         let metadata: LPLinkMetadata?
         if platform == .xiaohongshu {
@@ -91,7 +94,7 @@ enum LinkCoverStore {
         // 才用 logo」，所以这里不能先信 metadata。图单一次取回：第一张当封面，
         // 整单进检索——清单 / 攻略类笔记的内容分布在好几张图上。
         if platform == .xiaohongshu {
-            let note = await noteImages(for: target)
+            let note = await noteImages(for: target, onFirstImage: onCoverReady)
             title = note.title
             cover = note.images.first
             ocrImages = note.images
@@ -126,16 +129,29 @@ enum LinkCoverStore {
     static func refreshForIndex(
         _ target: URL, itemID: UUID
     ) async -> (title: String?, hasImages: Bool, coverChanged: Bool, pageParsed: Bool) {
-        let preview = await fetch(for: target)
+        // 封面先行：首图一到就落盘，卡片立刻能显示，不必等整单配图下完、
+        // 更不必等 OCR。剩下的图只服务检索，晚一点没人看得出来。
+        var coverChanged = false
+        let preview = await fetch(for: target) { first in
+            if store(first, for: itemID) { coverChanged = true }
+        }
         guard !Task.isCancelled else { return (nil, false, false, false) }
-        let coverChanged = preview.cover.map { store($0, for: itemID) } ?? false
+        if !coverChanged, let cover = preview.cover { coverChanged = store(cover, for: itemID) }
+        // 页面确实解析成功、却一张可用配图都没有：那么磁盘上留着的旧封面
+        // 必然是过时或假的（历史版本把平台 logo 当真图存过），清掉它，让 UI
+        // 回到自己的兜底样式。只在 pageParsed 为真时清——整页没抓下来时
+        // 什么都别动，那时候旧封面是我们仅有的东西。
+        if preview.cover == nil, preview.pageParsed {
+            try? FileManager.default.removeItem(at: url(for: itemID))
+        }
         let stored = !preview.ocrImages.isEmpty && storeOCRSources(preview.ocrImages, for: itemID)
         return (preview.title, stored, coverChanged, preview.pageParsed)
     }
 
     /// 小红书笔记的整单配图。抓一次 HTML，把 imageList 里前几张都取回来。
     private static func noteImages(
-        for target: URL
+        for target: URL,
+        onFirstImage: ((NSImage) -> Void)? = nil
     ) async -> (title: String?, images: [NSImage], pageParsed: Bool) {
         var request = URLRequest(url: target, timeoutInterval: 10)
         BrowserRequestHeaders.apply(.document, to: &request)
@@ -157,6 +173,7 @@ enum LinkCoverStore {
                   (imageResponse as? HTTPURLResponse)
                     .map({ (200..<300).contains($0.statusCode) }) == true,
                   let image = NSImage(data: imageData), image.size.width > 0 else { continue }
+            if images.isEmpty { onFirstImage?(image) }
             images.append(image)
         }
         return (note.title, images, true)

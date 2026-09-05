@@ -282,6 +282,56 @@ public enum SiteContentExtraction {
             return nil
         }
 
+        /// `new Map(` / `new Set(` 这类构造调用的左括号位置；不是就返回 nil。
+        ///
+        /// 只认已知的容器构造器，不做通用的"`new` 开头就当表达式"：状态里真
+        /// 出现别的构造器时，宁可解析失败被上层的兜底接住，也不要把一段猜不
+        /// 准边界的内容悄悄抹成 null。
+        private static func constructorOpenParen(
+            in text: String,
+            from index: String.Index
+        ) -> String.Index? {
+            for name in ["new Map", "new Set", "new Date"] {
+                guard text[index...].hasPrefix(name),
+                      var cursor = text.index(index, offsetBy: name.count, limitedBy: text.endIndex)
+                else { continue }
+                while cursor < text.endIndex, text[cursor].isWhitespace {
+                    cursor = text.index(after: cursor)
+                }
+                if cursor < text.endIndex, text[cursor] == "(" { return cursor }
+            }
+            return nil
+        }
+
+        /// 从左括号扫到配对的右括号，返回它后面一个位置。括号可以嵌套，字符串
+        /// 里的括号不算数。
+        private static func matchingParen(
+            in text: String,
+            openAt start: String.Index
+        ) -> String.Index? {
+            var depth = 0
+            var index = start
+            var inString = false
+            var escaped = false
+            while index < text.endIndex {
+                let character = text[index]
+                if inString {
+                    if escaped { escaped = false }
+                    else if character == "\\" { escaped = true }
+                    else if character == "\"" { inString = false }
+                } else if character == "\"" {
+                    inString = true
+                } else if character == "(" {
+                    depth += 1
+                } else if character == ")" {
+                    depth -= 1
+                    if depth == 0 { return text.index(after: index) }
+                }
+                index = text.index(after: index)
+            }
+            return nil
+        }
+
         private static func replacingUndefinedOutsideStrings(in text: String) -> String {
             var result = ""
             var index = text.startIndex
@@ -309,7 +359,20 @@ public enum SiteContentExtraction {
                 let isIdentifier: (Character?) -> Bool = { character in
                     character.map { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "$" } ?? false
                 }
-                if text[index...].hasPrefix("undefined"),
+                // `new Map([...])` / `new Set([...])`：平台把一部分 store 直接
+                // 序列化成了构造表达式。它们出现在我们根本不读的分店里
+                // （实测是 `AiNoteDetailStore`），但 JSONSerialization 是全有
+                // 全无的——一处解析不了，整份状态就废了，于是笔记的
+                // `imageList` 也跟着拿不到，悄悄退回 og:image 兜底，而那正是
+                // 平台 logo。这就是"标题正文都对、唯独封面是红方块"的由来。
+                // 整个构造表达式换成 null：我们不需要它的内容，只需要它别把
+                // 剩下的真数据一起拖下水。
+                if !isIdentifier(previous), text[index...].hasPrefix("new "),
+                   let openParen = constructorOpenParen(in: text, from: index),
+                   let afterCall = matchingParen(in: text, openAt: openParen) {
+                    result.append("null")
+                    index = afterCall
+                } else if text[index...].hasPrefix("undefined"),
                    !isIdentifier(previous), !isIdentifier(next),
                    let afterUndefined {
                     result.append("null")

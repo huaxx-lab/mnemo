@@ -218,6 +218,30 @@ func xiaohongshuFallsBackToMetadata() throws {
     #expect(note.imageURLs.map(\.absoluteString) == ["https://img.example/fallback.jpg"])
 }
 
+@Test("小红书：状态里出现 new Map(...) 时，笔记本身仍要能解析出来")
+func xiaohongshuSurvivesJavaScriptMapConstructor() throws {
+    // 平台把一部分 store 直接序列化成了 `new Map(...)` 这种构造表达式。它出现
+    // 在我们根本不读的分店里，但 JSONSerialization 是全有全无的——不处理的话
+    // 整份状态解析失败，笔记的 imageList 跟着拿不到，悄悄退回 og:image 兜底，
+    // 而那正是平台 logo。线上"标题正文都对、唯独封面是红方块"就是这么来的。
+    let html = """
+    <html><head><meta property="og:image" content="https://picasso-static.xiaohongshu.com/fe-platform/logo.png"></head>
+    <body><script>window.__INITIAL_STATE__={"note":{"noteDetailMap":{"target":{"note":
+    {"title":"真实标题","desc":"真实正文","imageList":[
+    {"url":"","infoList":[{"imageScene":"WB_PRV","url":"http://sns-webpic-qc.xhscdn.com/a!nd_prv"},
+    {"imageScene":"WB_DFT","url":"http://sns-webpic-qc.xhscdn.com/a!nd_dft"}]}]}}}},
+    "AiNoteDetailStore":{"noteDetailMap":new Map([["k",{"v":1}]]),"other":undefined}}</script></body></html>
+    """
+    let url = try #require(URL(string: "https://www.xiaohongshu.com/explore/target"))
+    let note = try #require(SiteContentExtraction.Xiaohongshu.note(fromHTML: html, url: url))
+    #expect(note.title == "真实标题", "走通结构化状态，而不是退回 og:title")
+    #expect(note.text == "真实正文")
+    #expect(
+        note.imageURLs.map(\.absoluteString) == ["https://sns-webpic-qc.xhscdn.com/a!nd_dft"],
+        "imageList 没有 urlDefault 时要从 infoList 取 WB_DFT，并升级成 HTTPS"
+    )
+}
+
 @Test("小红书：imageList 里的平台占位图不能当成笔记配图")
 func xiaohongshuRejectsPlatformPlaceholderImage() throws {
     // 分享链接的 token 失效时，页面照给真标题真正文，imageList 却换成了

@@ -1502,6 +1502,13 @@ if ProcessInfo.processInfo.environment["MNEMO_AUDIT_LINKS"] == "1",
     app.run()
     exit(EXIT_SUCCESS)
 }
+if ProcessInfo.processInfo.environment["MNEMO_DUMP_URL"] != nil,
+   ProcessInfo.processInfo.environment["MNEMO_DATA_ROOT"] != nil {
+    Task { @MainActor in await LinkHTMLDump.run() }
+    app.setActivationPolicy(.accessory)
+    app.run()
+    exit(EXIT_SUCCESS)
+}
 #endif
 guard let instanceGuard = SingleInstanceGuard() else { exit(EXIT_SUCCESS) }
 let delegate = AppDelegate(instanceGuard: instanceGuard)
