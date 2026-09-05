@@ -70,6 +70,18 @@ enum LinkSmokeCheck {
             // 不需要手动 enqueueIndex——但这里直接走 reparseLink 更贴近
             // 用户实际点的那个按钮。
             await model.pinClipboardItem(id)
+            // 复现"连续粘贴两条小红书链接"的突发场景：用户实报两张卡片
+            // 相隔 13 秒先后建成，标题都对、封面都空——单条链接单独测
+            // 复现不了，紧跟着第二条一起排队才最接近真实触发条件。
+            if let secondURLString = ProcessInfo.processInfo.environment["MNEMO_SMOKE_LINK_URL2"] {
+                let secondReport = await model.ingest(text: secondURLString)
+                print("SMOKE: second ingest inserted=\(secondReport.inserted) reused=\(secondReport.reused)")
+                if let secondURL = URL(string: secondURLString),
+                   let secondItem = model.items.first(where: { $0.linkURL == secondURL }) {
+                    await model.pinClipboardItem(secondItem.id)
+                    print("SMOKE: second pinned id=\(secondItem.id)")
+                }
+            }
             print("SMOKE: pinned, waiting for auto index to produce chunks")
             try await wait("auto index") {
                 let chunkCount = (try? await model.library.chunks(for: id))?.count ?? 0
@@ -119,6 +131,18 @@ enum LinkSmokeCheck {
 
             let final = try await model.library.item(id: id)
             let chunks = (try? await model.library.chunks(for: id)) ?? []
+            var secondItemStatus = "n/a"
+            if let secondURLString = ProcessInfo.processInfo.environment["MNEMO_SMOKE_LINK_URL2"],
+               let secondURL = URL(string: secondURLString),
+               let secondItem = model.items.first(where: { $0.linkURL == secondURL }) {
+                try await wait("second item settle", timeout: 60) {
+                    let chunkCount = (try? await model.library.chunks(for: secondItem.id))?.count ?? 0
+                    return chunkCount > 0
+                }
+                let refreshed = try await model.library.item(id: secondItem.id)
+                let secondCover = LinkCoverStore.cachedImage(for: secondItem.id) != nil
+                secondItemStatus = "title=\(refreshed?.title ?? "nil") coverPresent=\(secondCover)"
+            }
             let result = """
             PASS/INFO: \
             title=\(final?.title ?? "nil") \
@@ -131,7 +155,8 @@ enum LinkSmokeCheck {
             lastError=\(model.lastError ?? "nil") \
             secondReparseTitle=\(afterSecondReparse?.title ?? "nil") \
             secondReparseChunkCount=\(secondChunks.count) \
-            secondReparseCoverPresent=\(coverAfterSecond != nil)
+            secondReparseCoverPresent=\(coverAfterSecond != nil) \
+            secondItem: \(secondItemStatus)
             """
             print("SMOKE:", result)
             try (result + "\n").write(to: root.appending(path: "result.txt"), atomically: true, encoding: .utf8)
