@@ -5558,7 +5558,7 @@ final class AppModel {
         let links = items.filter { $0.kind == .link && shouldProcessContent($0) }
         guard !links.isEmpty else { return }
         // 单独记迁移额度，不重置普通链接的失败计数，避免重现每次启动补抓循环。
-        let migrationKey = "Pinland.xhsMigration.v6.attempts"
+        let migrationKey = "Pinland.xhsMigration.v7.attempts"
         var migrationAttempts = defaults.dictionary(forKey: migrationKey) as? [String: Int] ?? [:]
         let migrating = links.filter {
             LinkRefreshPolicy.needsMigration($0) && migrationAttempts[$0.id.uuidString, default: 0] < 3

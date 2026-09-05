@@ -299,6 +299,24 @@ public enum SiteContentExtraction {
             return result
         }
 
+        /// 平台自己的通用兜底标题/标语。整个网站在拿不到具体笔记时（被限流、
+        /// 需要登录、笔记被删、临时风控……）都会回落到这一句，og:title 和
+        /// `<title>` 完全一致，跟任何一条真实笔记都无关。
+        ///
+        /// 这不是某一条笔记的兜底文案，是**整个域名**的默认页标题——用户实报：
+        /// 一次后台批量迁移撞上这种响应，五条毫不相关的笔记被同时写成一模
+        /// 一样的"小红书 - 你的生活兴趣社区"，还带着 titleOrigin=page 的权威
+        /// 标记，把之前抓对的真标题顶掉了。必须在写回前识别并拒绝，而不是
+        /// 事后指望下一次迁移侥幸修正。
+        private static let genericSiteTaglines = ["你的生活兴趣社区"]
+
+        /// 公开这条判据：任何把小红书 og:title / `<title>` 当候选标题的地方
+        /// （不只是这个文件内部的 JSON-LD 兜底）都必须先过一遍这道闸，不能
+        /// 各自维护一份、迟早漏一处。
+        public static func isGenericSiteTitle(_ title: String) -> Bool {
+            genericSiteTaglines.contains { title.contains($0) }
+        }
+
         /// 极少数页面把状态拆成平台暂时无法解码的 JS 表达式时，用 JSON-LD / meta
         /// 保住标题、正文、首图。这个兜底不扫 DOM 登录框，不会把登录墙写进 RAG。
         private static func fallbackNote(
@@ -307,9 +325,16 @@ public enum SiteContentExtraction {
             imageLimit: Int
         ) -> XiaohongshuNoteExtraction? {
             guard let document = try? SwiftSoup.parse(html, url?.absoluteString ?? "") else { return nil }
-            let title = (try? document.select("meta[property=og:title]").first()?.attr("content"))
+            let rawTitle = (try? document.select("meta[property=og:title]").first()?.attr("content"))
                 .flatMap(titleFromDocumentTitle)
                 ?? (try? document.title()).flatMap(titleFromDocumentTitle)
+            // og:title / <title> 命中整站默认标语，说明这整份响应根本不是这条
+            // 笔记（限流/需要登录/笔记被删），而是网站自己的通用页——不只标题
+            // 不可信，og:description、og:image 大概率也是同一份通用页的内容，
+            // 不是这条笔记的。整份响应当场判失败，不逐字段各自决定要不要信，
+            // 那样迟早会有一个字段被漏判成"看着还行"。
+            guard rawTitle.map({ !isGenericSiteTitle($0) }) ?? true else { return nil }
+            let title = rawTitle
             let text = [
                 try? document.select("meta[property=og:description]").first()?.attr("content"),
                 try? document.select("meta[name=description]").first()?.attr("content"),

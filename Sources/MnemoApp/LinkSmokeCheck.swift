@@ -82,6 +82,27 @@ enum LinkSmokeCheck {
             let fast = try await model.library.chunks(for: id)
             print("SMOKE: fast-path settled — chunkCount=\(fast.count) sources=\(fast.map(\.source))")
 
+            // 用户明确关心的场景：点了一次"重新解析"之后再点一次，正确内容
+            // 不能被第二次点击悄悄换掉、也不能因为这次响应恰好不理想就
+            // 退化成占位标题或空内容。记下第一次成功后的状态，第二次跑完
+            // 逐项比对。
+            let afterFirstReparse = try await model.library.item(id: id)
+            let coverBeforeSecond = LinkCoverStore.cachedImage(for: id)?.tiffRepresentation
+            model.reparseLink(id)
+            print("SMOKE: second reparseLink called")
+            try await Task.sleep(for: .milliseconds(600))
+            try await wait("second reparse settle") { !model.isIndexing }
+            try await Task.sleep(for: .milliseconds(300))
+            let afterSecondReparse = try await model.library.item(id: id)
+            let coverAfterSecond = LinkCoverStore.cachedImage(for: id)?.tiffRepresentation
+            let secondChunks = try await model.library.chunks(for: id)
+            print("""
+            SMOKE: second-reparse comparison — \
+            titleBefore=\(afterFirstReparse?.title ?? "nil") titleAfter=\(afterSecondReparse?.title ?? "nil") \
+            chunkCountAfter=\(secondChunks.count) \
+            coverIdentical=\(coverBeforeSecond == coverAfterSecond) coverPresent=\(coverAfterSecond != nil)
+            """)
+
             // OCR 在后台跑，不挡上面那次"完成"——单独等它把配图分块补上，
             // 确认异步补丁真的落地了，而不是快是快了、OCR 结果却悄悄丢了。
             print("SMOKE: waiting for background OCR patch to land")
@@ -101,7 +122,10 @@ enum LinkSmokeCheck {
             finalChunkCount=\(chunks.count) \
             finalSources=\(chunks.map(\.source)) \
             feedback=\(model.feedbackMessage ?? "nil") \
-            lastError=\(model.lastError ?? "nil")
+            lastError=\(model.lastError ?? "nil") \
+            secondReparseTitle=\(afterSecondReparse?.title ?? "nil") \
+            secondReparseChunkCount=\(secondChunks.count) \
+            secondReparseCoverPresent=\(coverAfterSecond != nil)
             """
             print("SMOKE:", result)
             try (result + "\n").write(to: root.appending(path: "result.txt"), atomically: true, encoding: .utf8)

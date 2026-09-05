@@ -307,6 +307,17 @@ enum SemanticIndexCoordinator {
             // 依赖另一条 LPMetadataProvider 任务：正文进 RAG 了，卡片却仍叫
             // “无法访问链接内容”。只有临时本地标题能被自动替换；用户手写标题
             // (`titledLocally == false`) 永远保留。
+            // 最后一道闸，不管标题是从哪条上游路径抓来的：小红书被限流/风控时
+            // 返回的是整个网站的通用页，og:title 就是"小红书 - 你的生活兴趣
+            // 社区"这句网站标语，不是任何一条笔记的标题。用户实报：一次批量
+            // 迁移撞上这种响应，五条互不相关的笔记被同时写成同一句标语，还
+            // 顶掉了之前抓对的真标题。上游已经在源头挡过一次，这里再挡一次
+            // 是因为"标题从哪条路径来的"以后必然还会再长出新分支，唯一不会
+            // 漏的地方就是真正写盘的这一行。
+            if isXiaohongshu, let candidate = fetchedPageTitle,
+               SiteContentExtraction.Xiaohongshu.isGenericSiteTitle(candidate) {
+                fetchedPageTitle = nil
+            }
             if LinkRefreshPolicy.mayReplaceTitle(updated),
                let title = fetchedPageTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
                !title.isEmpty, title != updated.title {

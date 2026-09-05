@@ -50,6 +50,55 @@ func xiaohongshuSelectsTheRequestedNoteRecord() throws {
     #expect(note.segments == ["目标正文", "第二行"])
 }
 
+@Test("小红书：被限流/风控返回的通用页，标语标题绝不当作笔记标题写回")
+func xiaohongshuRejectsGenericSiteFallbackPage() throws {
+    // 用户实报：一次批量迁移撞上这种响应，五条互不相关的笔记被同时写成
+    // 同一句"小红书 - 你的生活兴趣社区"，顶掉了之前抓对的真标题。这是网站
+    // 拿不到具体笔记时（限流/需要登录/笔记被删）回落的**整站默认页**，
+    // og:title 和 <title> 完全一样，跟任何一条笔记都无关——没有
+    // __INITIAL_STATE__ 笔记数据，只有这句通用标语。
+    let html = """
+    <html><head>
+      <title>小红书 - 你的生活兴趣社区</title>
+      <meta property="og:title" content="小红书 - 你的生活兴趣社区">
+    </head><body></body></html>
+    """
+    let url = try #require(URL(string: "https://www.xiaohongshu.com/explore/blocked-note"))
+    #expect(SiteContentExtraction.Xiaohongshu.note(fromHTML: html, url: url) == nil)
+    #expect(SiteContentExtraction.Xiaohongshu.title(fromHTML: html) == nil)
+}
+
+@Test("小红书：标题命中通用标语时，整份响应判失败，不逐字段单独抢救")
+func xiaohongshuGenericTitlePageFailsEntirely() throws {
+    // og:title 命中标语说明这整份响应是网站自己的通用页，不是这条笔记的——
+    // og:description 大概率也是同一份通用页的内容（这里故意配一段听起来
+    // 也很像宣传语的摘要），不能"标题不算数、摘要单独抢救"，否则换一种
+    // 通用文案措辞又会从另一个字段漏过去。
+    let html = """
+    <html><head>
+      <title>小红书 - 你的生活兴趣社区</title>
+      <meta property="og:title" content="小红书 - 你的生活兴趣社区">
+      <meta property="og:description" content="发现更多有趣的内容，加入小红书一起分享生活。">
+    </head><body></body></html>
+    """
+    let url = try #require(URL(string: "https://www.xiaohongshu.com/explore/blocked-note-2"))
+    #expect(SiteContentExtraction.Xiaohongshu.note(fromHTML: html, url: url) == nil)
+}
+
+@Test("小红书：真实笔记标题即便含平台名，也不会被误判为通用标语")
+func xiaohongshuRealTitleMentioningPlatformSurvives() throws {
+    // 泛化判据只认"你的生活兴趣社区"这句固定标语，不按"含不含'小红书'
+    // 三个字"这种宽判据，否则会误伤内容里正常提到平台名的真实标题。
+    let html = """
+    <script>window.__INITIAL_STATE__={"note":{"noteDetailMap":{"target":{"note":{
+      "title":"小红书上的干货分享合集","desc":"正文","imageList":[]
+    }}}}}</script>
+    """
+    let url = try #require(URL(string: "https://www.xiaohongshu.com/explore/target"))
+    let note = try #require(SiteContentExtraction.Xiaohongshu.note(fromHTML: html, url: url))
+    #expect(note.title == "小红书上的干货分享合集")
+}
+
 @Test("小红书：状态里的裸 undefined 只在 JSON 字符串外替换")
 func xiaohongshuHandlesJavaScriptUndefinedWithoutChangingAuthoredText() throws {
     let html = """

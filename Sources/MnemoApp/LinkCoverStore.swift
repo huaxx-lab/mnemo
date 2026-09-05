@@ -107,7 +107,14 @@ enum LinkCoverStore {
         // 走到这一步拿到的都是页面真实配图，进检索；站点 logo 只是卡片占位，
         // 不给 OCR——一张红色 logo 识别出的"文字"只会污染检索。
         if ocrImages.isEmpty, let cover { ocrImages = [cover] }
-        if cover == nil { cover = await siteIcon(for: target) }
+        // 小红书不用站点 logo 兜底封面。卡片右下角本来就有一枚小红书平台徽标，
+        // 再把整张封面也画成同一个红色大图标纯属重复；更要命的是
+        // `refreshForIndex` 只要 cover 非 nil 就会**无条件**把它写盘覆盖旧文件——
+        // 用户实报：一次被限流/风控的重新抓取，页面解析彻底失败（pageParsed
+        // 还是 false），却因为这里兜底出一张 logo，把之前抓对的真实封面
+        // 覆盖成了红色 logo。cover 留空时 refreshForIndex 不会碰旧文件，
+        // UI 也有域名色块兜底，不会露出裸占位符。
+        if cover == nil, platform != .xiaohongshu { cover = await siteIcon(for: target) }
         return Preview(
             title: title.flatMap { $0.isEmpty ? nil : String($0.prefix(80)) },
             cover: cover,

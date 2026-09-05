@@ -1,7 +1,11 @@
 import Foundation
 
 public enum LinkRefreshPolicy {
-    public static let xiaohongshuVersion = 6
+    // v6→v7：修了"被限流/风控返回的整站通用页，标题/正文被误当成笔记内容
+    // 写回"的问题。少数条目在 v6 那次迁移里恰好撞上这种响应，标题被顶成了
+    // 网站自己的标语——版本号必须再前进一格，让它们重新成为迁移候选，
+    // 不用等用户逐条手动点"重新解析"。
+    public static let xiaohongshuVersion = 7
 
     public static func isNote(_ url: URL?) -> Bool {
         guard let url, LinkPlatform.resolve(url) == .xiaohongshu else { return false }

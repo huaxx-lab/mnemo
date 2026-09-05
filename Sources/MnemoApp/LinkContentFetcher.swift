@@ -134,13 +134,18 @@ enum LinkContentFetcher {
             ) {
                 extracted = structured
             } else if LinkPlatform.resolve(finalURL) == .xiaohongshu {
-                // 小红书结构化状态有时会因分享 token 过期而缺失。这时只接受
-                // 页面 meta 摘要；通用 DOM 里那一大段“扫码/手机号登录/用户协议”
-                // 再长也只是登录墙，绝不能写进 RAG。
+                // 结构化解析（含它内部的 JSON-LD/meta 兜底）都失败了才会走到这里——
+                // 通常意味着这次响应根本不是这条笔记，而是被限流/风控时的通用页。
+                // 那种页面的 og:title 就是网站自己的标语"小红书 - 你的生活兴趣
+                // 社区"，绝不能当作笔记标题写回；summary 同理可能只是通用摘要，
+                // 不是登录墙也不是这条笔记的内容，写进 RAG 只会污染检索。
                 guard let summary = generic.summary,
                       !SiteContentExtraction.Xiaohongshu.isLoginWall(summary) else { return nil }
+                let title = generic.title.flatMap {
+                    SiteContentExtraction.Xiaohongshu.isGenericSiteTitle($0) ? nil : $0
+                }
                 extracted = LinkTextExtraction.Extracted(
-                    title: generic.title,
+                    title: title,
                     text: summary,
                     summary: summary
                 )
