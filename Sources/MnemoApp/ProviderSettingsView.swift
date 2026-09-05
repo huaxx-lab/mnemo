@@ -13,6 +13,7 @@ private enum SettingsPage: String, CaseIterable, Identifiable {
     case todos = "待办与提醒"
     case accounts = "站点登录"
     case shortcuts = "快捷键"
+    case ragLibrary = "检索库详情"
     case storage = "存储与回收站"
     case appearance = "外观与行为"
 
@@ -25,6 +26,7 @@ private enum SettingsPage: String, CaseIterable, Identifiable {
         case .todos: "checklist"
         case .accounts: "person.crop.circle.badge.checkmark"
         case .shortcuts: "command"
+        case .ragLibrary: "chart.bar.doc.horizontal"
         case .storage: "internaldrive"
         case .appearance: "paintbrush"
         }
@@ -61,6 +63,8 @@ struct ProviderSettingsView: View {
                         SiteAccountSettingsPage()
                     case .shortcuts:
                         ShortcutSettingsPage(shortcuts: shortcuts)
+                    case .ragLibrary:
+                        RAGLibraryStatsPage(appModel: appModel)
                     case .storage:
                         StorageSettingsPage(appModel: appModel)
                     case .appearance:
@@ -118,9 +122,9 @@ struct ProviderSettingsView: View {
             shortcuts.saveSettings()
         case .storage:
             appModel.saveSettings()
-        case .accounts:
-            // 登录/退出登录一发生就立刻生效落盘，不走"编辑后点保存"这条路——
-            // 这里点"保存当前页"只是让状态栏显示"已保存"，没有别的东西要写。
+        case .accounts, .ragLibrary:
+            // 这两页都没有可编辑的设置：登录/退出一发生就立刻落盘，检索库详情
+            // 是只读的体检结果。点"保存当前页"只是让状态栏显示"已保存"。
             break
         }
         savedPage = page
@@ -1556,7 +1560,8 @@ private struct StorageSettingsPage: View {
     }
 }
 
-private enum StorageByteFormat {
+/// 设置页之间共用的基础件，检索库详情页也要用，不再限制在本文件内。
+enum StorageByteFormat {
     static func short(_ bytes: Int64) -> String {
         ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
@@ -1856,7 +1861,7 @@ private struct CustomProviderSheet: View {
     }
 }
 
-private struct SettingsCard<Content: View>: View {
+struct SettingsCard<Content: View>: View {
     let title: String
     let subtitle: String?
     let helpText: String?
@@ -1889,7 +1894,7 @@ private struct SettingsCard<Content: View>: View {
     }
 }
 
-private struct OptionalHelpModifier: ViewModifier {
+struct OptionalHelpModifier: ViewModifier {
     let text: String?
     init(_ text: String?) { self.text = text }
     func body(content: Content) -> some View {
@@ -2166,7 +2171,7 @@ private enum SettingsAssetCache {
     }
 }
 
-private enum SettingsPalette {
+enum SettingsPalette {
     static let background = Color(nsColor: .windowBackgroundColor)
     static let sidebar = Color(nsColor: .underPageBackgroundColor).opacity(0.92)
     static let card = Color(nsColor: .controlBackgroundColor).opacity(0.78)
