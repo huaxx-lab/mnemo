@@ -615,12 +615,22 @@ private struct CollapsedBar: View {
             }
         }
         .overlay(alignment: .top) {
+            // 这一圈光不依赖黑底：待办创建成功时刘海往往刚好已经收回安静态
+            // （识别结束、卡片已收掉），原来挂在 `!isQuiet` 后面导致这一下
+            // 反馈从来没真正显示过。识别中的轻光同样不依赖黑底，两者待遇
+            // 保持一致。
+            //
+            // 宽度必须严丝合缝等于 notchWidth，不能像工作台那份一样再加
+            // 24——安静态的窗口本身就只有 notchWidth 那么宽（没有两翼），
+            // 比这圈光的取景框还窄，多出来的部分会被窗口边界整段裁掉：
+            // 剩下的不是一整圈，而是贴着顶边的一小段线，两侧竖线全没了。
+            // 这正是"刘海外部多出一圈、看着像一条线"的真实成因。
             if model.edgeStatusEffectsEnabled, model.isRecognizingTodos {
                 TodoRecognitionEdge(shape: shape)
-                    .frame(width: NotchLayout.notchWidth + 24, height: NotchLayout.notchHeight)
-            } else if !isQuiet, model.edgeStatusEffectsEnabled, let signal = model.edgeStatusSignal {
+                    .frame(width: NotchLayout.notchWidth, height: NotchLayout.notchHeight)
+            } else if model.edgeStatusEffectsEnabled, let signal = model.edgeStatusSignal {
                 EdgeStatusGlow(shape: shape, signal: signal)
-                    .frame(width: NotchLayout.notchWidth + 24, height: NotchLayout.notchHeight)
+                    .frame(width: NotchLayout.notchWidth, height: NotchLayout.notchHeight)
                     .id(signal)
             }
         }
@@ -665,7 +675,9 @@ private struct CollapsedBar: View {
                 .foregroundStyle(didAutoCopyFirstSuggestion ? Style.cool : Style.accent)
                 .help(leadingSuggestionLabel)
         case .indexing, .syncing:
-            if !model.isRecognizingTodos { ProcessingDots(tint: Style.cool, dotSize: 3) }
+            // 待办识别不会走到这个分支：barState 在识别期间统一是 .idle，
+            // 两翼的点只留给真正的索引/AI 处理。
+            ProcessingDots(tint: Style.cool, dotSize: 3)
         case .dropTargeted:
             Image(systemName: "plus")
                 .font(.system(size: 12, weight: .semibold))
@@ -716,7 +728,7 @@ private struct CollapsedBar: View {
                 .help("关闭推荐")
             }
         case .indexing, .syncing:
-            if !model.isRecognizingTodos { ProcessingDots(tint: Style.cool, dotSize: 3) }
+            ProcessingDots(tint: Style.cool, dotSize: 3)
         case .dropTargeted:
             Image(systemName: model.inboundPayloadKind.symbol)
                 .font(.system(size: 11, weight: .semibold))
@@ -6059,11 +6071,15 @@ private struct EdgeStatusGlow<S: Shape>: View {
     @State private var active = false
 
     var body: some View {
+        // 一下弹到亮、带一点回弹地稳住，而不是持续来回的呼吸——那种慢悠悠的
+        // 律动更适合"还在识别"，拿来说"成功了"反而含糊：短暂展示时甚至等不到
+        // 一次完整的呼吸就被收掉，看着像没反应。这里改成一次性的弹簧上扬，
+        // 停在明显亮的那一档，直到这条信号自己过期消失。
         shape
-            .stroke(color.opacity(reduceMotion ? 0.42 : (active ? 0.58 : 0.14)), lineWidth: 1)
-            .shadow(color: color.opacity(reduceMotion ? 0.16 : (active ? 0.34 : 0.05)), radius: active ? 5 : 2)
+            .stroke(color.opacity(reduceMotion ? 0.42 : (active ? 0.62 : 0.12)), lineWidth: 1.1)
+            .shadow(color: color.opacity(reduceMotion ? 0.18 : (active ? 0.4 : 0.04)), radius: active ? 6 : 2)
             .animation(
-                reduceMotion ? nil : .easeInOut(duration: 0.82).repeatForever(autoreverses: true),
+                reduceMotion ? nil : .spring(response: 0.22, dampingFraction: 0.55),
                 value: active
             )
             .onAppear { active = true }

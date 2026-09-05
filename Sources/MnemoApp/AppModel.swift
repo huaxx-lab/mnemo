@@ -316,7 +316,13 @@ final class AppModel {
             )
         }
     }
-    @ObservationIgnored private var semanticHitIndex: [UUID: SemanticSearchHit] = [:]
+    // 这两个索引不能标 @ObservationIgnored：卡片不直接读 semanticHits /
+    // retrievalRecommendations 数组本身，只通过 semanticHit(for:) /
+    // retrievalRecommendation(for:) 查这份索引。标了 ignored 就等于告诉
+    // Observation "没人关心它变了"——于是搜索结果或推荐一到，已经画出来的
+    // 卡片不会重画，星标和"网页命中"要等下一次不相关的重画（比如悬浮
+    // 改了 hovering）才会显出来，看着像"要悬停一下才出现"。
+    private var semanticHitIndex: [UUID: SemanticSearchHit] = [:]
 
     private(set) var retrievalRecommendations: [RetrievalRecommendation] = [] {
         didSet {
@@ -326,7 +332,7 @@ final class AppModel {
             )
         }
     }
-    @ObservationIgnored private var retrievalRecommendationIndex: [UUID: RetrievalRecommendation] = [:]
+    private var retrievalRecommendationIndex: [UUID: RetrievalRecommendation] = [:]
     private(set) var semanticQuery = ""
     private(set) var understoodSearchQuery: StructuredQuery?
     private(set) var isPerformingSemanticSearch = false
@@ -2004,10 +2010,16 @@ final class AppModel {
         if todoPrompt != nil { return .todoDraft }
         if focusTimer.phase == .running { return .timing }
         if focusTimer.phase == .paused { return .paused }
+        // 待办识别单独占一档、优先于"忙"：它只用刘海边缘的轻光反馈，两翼
+        // 的三个点已经在 leadingStatus/trailingStatus 里被专门关掉了。如果
+        // 这里仍然汇入 .indexing，两翼会照常按"忙"撑宽、底下垫上纯黑——
+        // 点没了，只剩一块空黑底和中间一圈够不到边的光，正是被吐槽的
+        // "刘海外部多出一圈"。识别可能和真正的索引/AI 处理同时发生，
+        // 但只要在识别，就统一按"安静"布局，把两翼和黑底都收回去。
+        if isRecognizingTodos { return .idle }
         // 正在判断这次复制要不要检索时也让刘海动起来，否则中间那一两秒
-        // 完全没有反馈，看着像什么都没发生。待办理解同理：模型那一两轮
-        // ReAct 调用是秒级的，跑的时候两翼的点要动着。
-        if isIndexing || isAIProcessing || isResolvingContext || isRecognizingTodos { return .indexing }
+        // 完全没有反馈，看着像什么都没发生。
+        if isIndexing || isAIProcessing || isResolvingContext { return .indexing }
         return .idle
     }
 
