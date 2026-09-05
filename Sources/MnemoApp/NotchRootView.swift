@@ -1543,10 +1543,20 @@ private struct PinBoundaryDropDelegate: DropDelegate {
     @Bindable var model: AppModel
     @Binding var isTargeted: Bool
 
+    /// 这条线是钉住区和普通区**唯一**的分界，两边都能落。之前只认"从普通区
+    /// 拖进来"（`!isPinnedToFront`），已经钉住的卡拖不进来——听着是防误触，
+    /// 实际把"反向"堵死了：用户把卡钉进去之后，最顺手的撤销动作就是原路
+    /// 沿同一条线拖回来，而这条线偏偏只肯认一个方向，卡片松手后弹回钉住区，
+    /// 看起来就是"怎么拖都取消不了"。空白处拖拽（`GroupDetachDropDelegate`）
+    /// 确实能取消钉住，但用户没理由知道"回到普通区必须避开这条线"。
     private var draggedItem: UUID? {
-        guard case .item(let id) = model.outboundDrag,
-              !model.isPinnedToFront(id) else { return nil }
+        guard case .item(let id) = model.outboundDrag else { return nil }
         return id
+    }
+
+    private var isUnpinning: Bool {
+        guard let id = draggedItem else { return false }
+        return model.isPinnedToFront(id)
     }
 
     func validateDrop(info: DropInfo) -> Bool { draggedItem != nil }
@@ -1579,11 +1589,18 @@ private struct PinBoundaryDropDelegate: DropDelegate {
             return false
         }
         isTargeted = false
+        let shouldUnpin = isUnpinning
         model.completeOutboundDrop()
-        // 边界紧挨钉住区的末尾，卡片落在这格就应追加到末尾；不是跳到
-        // 整个钉住区第一张之前。
         withAnimation(.spring(response: 0.32, dampingFraction: 0.84)) {
-            model.pinToFront(id)
+            if shouldUnpin {
+                // 已经钉住的卡落在这条线上 = 要退出钉住区，落点正是普通区最
+                // 前面——和它从普通区被拖进来时排在钉住区末尾对称。
+                model.unpinFromFront(id)
+            } else {
+                // 边界紧挨钉住区的末尾，卡片落在这格就应追加到末尾；不是跳到
+                // 整个钉住区第一张之前。
+                model.pinToFront(id)
+            }
         }
         return true
     }
