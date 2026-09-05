@@ -5330,6 +5330,23 @@ final class AppModel {
                         if self.manualLinkRefreshIDs.remove(id) != nil {
                             self.showTransientFeedback("重新解析失败，已保留原检索内容")
                         }
+                    } else {
+                        // 刚粘进来第一次抓就失败——不是"刷新旧内容"，走不到上面
+                        // 那条清队路径，之前压根没有任何计次：一条真的抓不到的
+                        // 链接（反爬、需要登录、纯视频）会永远留在 pendingIndexIDs
+                        // 里，每次开机 resumeIndexing 都把它捞出来重跑一遍，刘海
+                        // 因此在每次启动后都亮着"正在索引"的宽边，肉眼看就是
+                        // "关都关不掉的一圈黑"。和下面强制刷新共用同一份计次表，
+                        // 用满照样悄悄退出队列——不再挣扎，也不再反复占用忙碌态。
+                        var attempts = (UserDefaults.standard.dictionary(
+                            forKey: Self.linkReparseAttemptsKey
+                        ) as? [String: Int]) ?? [:]
+                        let count = attempts[id.uuidString, default: 0] + 1
+                        attempts[id.uuidString] = count
+                        UserDefaults.standard.set(attempts, forKey: Self.linkReparseAttemptsKey)
+                        if count >= Self.linkReparseMaxAttempts {
+                            self.removePendingIndex(id)
+                        }
                     }
                 }
                 if result.dimensionChanged {
