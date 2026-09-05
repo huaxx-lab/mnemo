@@ -251,7 +251,9 @@ public enum TodoRevisionPrompt {
     10. todo 参数只能填清单里已有的编号，不许猜，也不许编。
     11. evidence 必须逐字复制自原文，并且只支撑当前这一条；不能概括、不能改写。
     12. code 必须逐字来自原文，不能纠正或补位。无法确定就不填。
-    13. 取消、完成 needsConfirmation 必须 true；有指代、主体不清、OCR 歧义时也要 true。
+    13. 新建/改期只有**非常不确定**时 highUncertainty=true：主体或指代无法唯一确定、
+        OCR 严重歧义、或时间证据互相冲突；并填写 uncertaintyReason。普通明确任务
+        必须 false，即使它是模型判断，也不要为了保守一律请求确认。
     14. 拿不准是不是任务就不要调用任何 create/reschedule/complete/cancel。
         误建一条比漏掉一条更糟。
     15. 只有日期没有钟点时，交东西（截止、提交、报名、缴费）用当天 23:59，
@@ -259,8 +261,9 @@ public enum TodoRevisionPrompt {
         中午/下午/傍晚/晚上"就按它对应的钟点。这些都通过 resolve_time 表达，
         把带时段词的原文整句传进去。
 
-    判断完就停下，不要再输出解释性文字。什么待办都没有时，不调用任何工具，
-    直接回一句"无"。
+    读取工具回执后继续检查是否还有未处理的事项。结论工具返回 accepted 只表示
+    提案已收集，不表示已经落库；不要重复提交已接受的提案。没有待办时，读取
+    current_time 后直接回复「无」，不要编造调用。
     """
 
     /// few-shot 例子。
@@ -371,7 +374,9 @@ public enum TodoRevisionPrompt {
         let index = (arguments["todo"] as? NSNumber)?.intValue
             ?? (arguments["todo"] as? Int)
         let kind = string("kind").flatMap(TodoRevisionDecision.Kind.init(rawValue:)) ?? .general
-        let needsConfirmation = (arguments["needsConfirmation"] as? Bool) ?? true
+        let needsConfirmation = (arguments["highUncertainty"] as? Bool)
+            ?? (arguments["needsConfirmation"] as? Bool) ?? false
+        let uncertaintyReason = string("uncertaintyReason")
         // 实测模型会给 evidence 套上原文没有的引号（"今天下午八点开会"）。
         // 剥掉成对的弯/直引号再验证，别为一个格式差异丢掉整条待办。
         let evidence = string("evidence").map { raw -> String in
@@ -387,7 +392,8 @@ public enum TodoRevisionPrompt {
 
         switch call.name {
         case TodoTools.createTodo.name:
-            guard let title = string("title"), evidence != nil else { return nil }
+            guard let title = string("title"), evidence != nil,
+                  !needsConfirmation || uncertaintyReason != nil else { return nil }
             return TodoRevisionDecision(
                 action: .create, index: nil, title: title, dueAt: date("dueAt"),
                 reason: reason, kind: kind, service: string("service"),
@@ -395,7 +401,8 @@ public enum TodoRevisionPrompt {
                 needsConfirmation: needsConfirmation
             )
         case TodoTools.rescheduleTodo.name:
-            guard let index, let dueAt = date("dueAt"), evidence != nil else { return nil }
+            guard let index, let dueAt = date("dueAt"), evidence != nil,
+                  !needsConfirmation || uncertaintyReason != nil else { return nil }
             return TodoRevisionDecision(
                 action: .reschedule, index: index, title: nil, dueAt: dueAt,
                 reason: reason, kind: kind, evidence: evidence,

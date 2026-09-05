@@ -49,7 +49,9 @@ enum LinkContentFetcher {
             }
         }
         // 小红书：笔记全文在 __INITIAL_STATE__ 里，比被截断的 meta 完整。
-        if let note = SiteContentExtraction.Xiaohongshu.extract(fromHTML: html) {
+        if LinkPlatform.resolve(url) == .xiaohongshu,
+           let note = SiteContentExtraction.Xiaohongshu.extract(fromHTML: html)
+                ?? SiteContentExtraction.Xiaohongshu.title(fromHTML: html) {
             // 标题也从状态里取。<title> 在作者没填标题时会被整段正文顶替，
             // 还带着 #话题# 和 " - 小红书" 后缀。
             let title = SiteContentExtraction.Xiaohongshu.title(fromHTML: html)

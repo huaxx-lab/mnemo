@@ -298,8 +298,21 @@ private struct WorkspaceShell: View {
                 if model.isDropTargeted {
                     shape.strokeBorder(Style.accent.opacity(0.75), lineWidth: 1.5)
                 }
-                if model.edgeStatusEffectsEnabled, let signal = model.edgeStatusSignal {
-                    EdgeStatusGlow(shape: shape, signal: signal).id(signal)
+                // 工作台展开时只亮顶部刘海轮廓，不给整张面板描边。
+                if model.edgeStatusEffectsEnabled, model.isRecognizingTodos {
+                    TodoRecognitionEdge(
+                        shape: UnevenRoundedRectangle(bottomLeadingRadius: 11, bottomTrailingRadius: 11)
+                    )
+                    .frame(width: NotchLayout.notchWidth + 24, height: NotchLayout.notchHeight)
+                    .frame(maxHeight: .infinity, alignment: .top)
+                } else if model.edgeStatusEffectsEnabled, let signal = model.edgeStatusSignal {
+                    EdgeStatusGlow(
+                        shape: UnevenRoundedRectangle(bottomLeadingRadius: 11, bottomTrailingRadius: 11),
+                        signal: signal
+                    )
+                    .frame(width: NotchLayout.notchWidth + 24, height: NotchLayout.notchHeight)
+                    .frame(maxHeight: .infinity, alignment: .top)
+                    .id(signal)
                 }
             }
         }
@@ -554,8 +567,11 @@ private struct CollapsedBar: View {
                     TodoPromptCard(
                         prompt: prompt,
                         fromNearbyDevice: model.todoDraftCameFromNearbyDevice,
-                        deviceKind: model.todoDraftDeviceKind
+                        deviceKind: model.todoDraftDeviceKind,
+                        busy: model.isMutatingTodoPrompt,
+                        remaining: model.remainingTodoPromptCount
                     )
+                    .id(prompt.transitionID)
                     .frame(
                         width: NotchLayout.actionCardWidth,
                         height: NotchLayout.actionCardHeight
@@ -599,13 +615,12 @@ private struct CollapsedBar: View {
             }
         }
         .overlay(alignment: .top) {
-            if !isQuiet, model.edgeStatusEffectsEnabled, let signal = model.edgeStatusSignal {
+            if model.edgeStatusEffectsEnabled, model.isRecognizingTodos {
+                TodoRecognitionEdge(shape: shape)
+                    .frame(width: NotchLayout.notchWidth + 24, height: NotchLayout.notchHeight)
+            } else if !isQuiet, model.edgeStatusEffectsEnabled, let signal = model.edgeStatusSignal {
                 EdgeStatusGlow(shape: shape, signal: signal)
-                    .frame(
-                        height: showsList || supplement != .none
-                            ? metrics.panelSize.height
-                            : NotchLayout.notchHeight
-                    )
+                    .frame(width: NotchLayout.notchWidth + 24, height: NotchLayout.notchHeight)
                     .id(signal)
             }
         }
@@ -619,9 +634,10 @@ private struct CollapsedBar: View {
                 : .easeIn(duration: 0.2).delay(0.1)),
             value: isFadingOut
         )
-        .animation(.snappy(duration: 0.26), value: model.barState)
+        .animation(reduceMotion ? nil : .snappy(duration: 0.26), value: model.barState)
         .animation(.snappy(duration: 0.26), value: model.contextSuggestions.map(\.itemID))
-        .animation(.snappy(duration: 0.26), value: supplement)
+        .animation(reduceMotion ? nil : .snappy(duration: 0.26), value: supplement)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: model.todoPrompt?.transitionID)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(accessibilityLabel)
     }
@@ -649,7 +665,7 @@ private struct CollapsedBar: View {
                 .foregroundStyle(didAutoCopyFirstSuggestion ? Style.cool : Style.accent)
                 .help(leadingSuggestionLabel)
         case .indexing, .syncing:
-            ProcessingDots(tint: Style.cool, dotSize: 3)
+            if !model.isRecognizingTodos { ProcessingDots(tint: Style.cool, dotSize: 3) }
         case .dropTargeted:
             Image(systemName: "plus")
                 .font(.system(size: 12, weight: .semibold))
@@ -700,7 +716,7 @@ private struct CollapsedBar: View {
                 .help("关闭推荐")
             }
         case .indexing, .syncing:
-            ProcessingDots(tint: Style.cool, dotSize: 3)
+            if !model.isRecognizingTodos { ProcessingDots(tint: Style.cool, dotSize: 3) }
         case .dropTargeted:
             Image(systemName: model.inboundPayloadKind.symbol)
                 .font(.system(size: 11, weight: .semibold))
@@ -748,11 +764,7 @@ private struct CollapsedBar: View {
                 "库里有相关内容"
             }
         case .todoDraft:
-            switch model.todoPrompt {
-            case .created(let plan, _): "已完成：\(plan.summary)，\(plan.title)"
-            case .asking(let plan, _): "要\(plan.summary)吗：\(plan.title)"
-            case nil: "待办候选"
-            }
+            model.todoPrompt.map { "要\($0.plan.summary)吗：\($0.plan.title)" } ?? "待办候选"
         case .reminding:
             if let reminder = model.activeReminder {
                 "待办提醒：\(reminder.title)，"
@@ -776,6 +788,11 @@ private struct TodoPromptCard: View {
     let prompt: AppModel.TodoPrompt
     let fromNearbyDevice: Bool
     var deviceKind: NearbyDeviceKind = .unknown
+    var busy = false
+    var remaining = 0
+    var confirm: (() -> Void)?
+    var reject: (() -> Void)?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var plan: TodoRevisionPlan { prompt.plan }
     private var presentation: TodoPresentationMetadata { TodoPresentationMetadata(plan: plan) }
@@ -811,23 +828,48 @@ private struct TodoPromptCard: View {
             Spacer(minLength: 6)
 
             HStack(spacing: NotchAnchorLayoutMetrics.supplementalActionSpacing) {
-                if case .asking = prompt {
-                    CircleGlyphButton(symbol: "checkmark", tint: Style.cool)
+                if busy {
+                    ProgressView().controlSize(.small).frame(width: 24, height: 24)
+                } else {
+                    if case .asking = prompt {
+                        if let confirm {
+                            Button(action: confirm) { CircleGlyphButton(symbol: "checkmark", tint: Style.cool) }
+                                .buttonStyle(.plain).help("确认加入待办")
+                        } else { CircleGlyphButton(symbol: "checkmark", tint: Style.cool) }
+                    }
+                    if let reject {
+                        Button(action: reject) { CircleGlyphButton(symbol: "xmark", tint: Style.tertiary) }
+                            .buttonStyle(.plain).help("忽略 / 撤销")
+                    } else { CircleGlyphButton(symbol: "xmark", tint: Style.tertiary) }
                 }
-                CircleGlyphButton(symbol: "xmark", tint: Style.tertiary)
             }
         }
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: busy)
         .padding(.leading, 12)
         .padding(.trailing, NotchAnchorLayoutMetrics.supplementalActionInset)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    private var dueDate: Date? {
+        switch plan.revision {
+        case .create(let draft): draft.dueAt
+        case .reschedule(_, _, _, let to): to
+        case .rename(_, _, _, let due, _): due
+        case .complete, .cancel: nil
+        }
+    }
+
     private var subtitle: String {
         var parts: [String] = []
-        if case .created = prompt { parts.append("已完成") }
+        if busy { parts.append("正在保存…") }
+        else { parts.append("需要确认") }
+        if let due = dueDate {
+            parts.append(due.formatted(.dateTime.month().day().hour().minute()))
+        }
+        if remaining > 0 { parts.append("后续 \(remaining) 项") }
         if fromNearbyDevice { parts.append("来自\(deviceKind.displayName)") }
         if let code = plan.code, !plan.title.contains(code) { parts.append("编号 \(code)") }
-        parts.append(plan.summary)
+        if dueDate == nil { parts.append(plan.summary) }
         return parts.joined(separator: " · ")
     }
 
@@ -836,7 +878,7 @@ private struct TodoPromptCard: View {
     /// 之前是按待办的来源分（取餐码 / 快递 / 截止），但卡片上现在承载的是
     /// 一次改动，不是一条待办——"取消组会"配一个日历图标只会让人以为要加日程。
     private var symbol: String {
-        switch plan.revision {
+        return switch plan.revision {
         case .create(let draft):
             switch draft.source {
             case .pickupCode: "takeoutbag.and.cup.and.straw.fill"
@@ -852,7 +894,7 @@ private struct TodoPromptCard: View {
     }
 
     private var tint: Color {
-        switch plan.revision {
+        return switch plan.revision {
         case .create(let draft): draft.source == .delivery ? Style.warning : Style.accent
         case .reschedule: Style.accent
         case .rename: Style.secondary
@@ -2691,7 +2733,7 @@ private struct StashWorkspace: View {
         // 只剩空白——界面在承诺一个根本不存在的入口。
         let groups: [AppModel.LinkGroup] = model.activeTab == .kind(.link)
             ? model.availableLinkGroups : []
-        let folders: [CardGroup] = model.activeTab == .all
+        let folders: [CardGroup] = CardGroupProjection.shouldShowManualFilters(tabKind: model.activeTab.kind)
             ? model.availableCardGroups : []
         return ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 4) {
@@ -5994,6 +6036,22 @@ private struct QuickActionBar: View {
     }
 }
 
+private struct TodoRecognitionEdge<S: Shape>: View {
+    let shape: S
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var lit = false
+
+    var body: some View {
+        shape
+            .stroke(Style.cool.opacity(reduceMotion ? 0.24 : (lit ? 0.34 : 0.10)), lineWidth: 0.8)
+            .shadow(color: Style.cool.opacity(reduceMotion ? 0.10 : (lit ? 0.20 : 0.04)), radius: lit ? 4 : 1)
+            .animation(reduceMotion ? nil : .easeInOut(duration: 1.25).repeatForever(autoreverses: true), value: lit)
+            .onAppear { lit = true }
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+}
+
 private struct EdgeStatusGlow<S: Shape>: View {
     let shape: S
     let signal: AppModel.EdgeStatusSignal
@@ -6002,8 +6060,8 @@ private struct EdgeStatusGlow<S: Shape>: View {
 
     var body: some View {
         shape
-            .stroke(color.opacity(reduceMotion ? 0.72 : (active ? 0.94 : 0.26)), lineWidth: 1.5)
-            .shadow(color: color.opacity(reduceMotion ? 0.30 : (active ? 0.72 : 0.10)), radius: active ? 9 : 3)
+            .stroke(color.opacity(reduceMotion ? 0.42 : (active ? 0.58 : 0.14)), lineWidth: 1)
+            .shadow(color: color.opacity(reduceMotion ? 0.16 : (active ? 0.34 : 0.05)), radius: active ? 5 : 2)
             .animation(
                 reduceMotion ? nil : .easeInOut(duration: 0.82).repeatForever(autoreverses: true),
                 value: active
@@ -6017,6 +6075,7 @@ private struct EdgeStatusGlow<S: Shape>: View {
         switch signal {
         case .focusCompleted: Style.accent
         case .indexingFailed: Style.warning
+        case .todoCreated: Style.cool
         }
     }
 }

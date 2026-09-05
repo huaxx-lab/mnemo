@@ -487,7 +487,12 @@ public enum TodoRecognitionPolicy {
 }
 
 public enum ClipboardContentProcessingPolicy {
-    public static func authorizesNewTemporaryCapture(isEnabled: Bool) -> Bool { isEnabled }
+    /// 当前来源优先于历史授权，Mac 未固定内容永不进入后台处理。
+    public static func permitsBackgroundWork(_ item: Item, isFromNearbyDevice: Bool) -> Bool {
+        item.state == .active && !item.isPrivate
+            && (item.origin != .clipboard || item.isPinned || isFromNearbyDevice)
+    }
+
 
     public static func shouldProcess(
         origin: ItemOrigin,

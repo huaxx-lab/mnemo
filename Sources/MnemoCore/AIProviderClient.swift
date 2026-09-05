@@ -612,11 +612,18 @@ public actor AIProviderClient {
                         messages.append(["role": "assistant", "content": blocks])
                     case .toolResult(let result):
                         // Anthropic 把工具结果放在**用户**回合里。
-                        messages.append(["role": "user", "content": [[
-                            "type": "tool_result",
-                            "tool_use_id": result.callID,
+                        let block: [String: Any] = [
+                            "type": "tool_result", "tool_use_id": result.callID,
                             "content": result.contentJSON,
-                        ]]])
+                        ]
+                        if messages.last?["role"] as? String == "user",
+                           var blocks = messages.last?["content"] as? [[String: Any]],
+                           blocks.allSatisfy({ $0["type"] as? String == "tool_result" }) {
+                            blocks.append(block)
+                            messages[messages.count - 1]["content"] = blocks
+                        } else {
+                            messages.append(["role": "user", "content": [block]])
+                        }
                     }
                 }
                 body["messages"] = messages

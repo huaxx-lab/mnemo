@@ -1042,3 +1042,31 @@ func credentialsStillBlockEvenAlongsideAPhoneNumber() {
     // 否则用户看到的原因和实际原因对不上。
     #expect(screening.blockingMatches == [.apiCredential])
 }
+
+@Test("工具会话保留完整往返：Anthropic 多结果合并为一个用户回合")
+func anthropicToolResultsAreOneTurn() async throws {
+    let transport = RecordingTransport([try jsonResponse([
+        "content": [["type": "tool_use", "id": "create-1", "name": "create_todo", "input": ["title": "开会", "evidence": "开会"]]],
+        "stop_reason": "tool_use"
+    ])])
+    let client = AIProviderClient(transport: transport)
+    let output = try await client.complete(
+        provider: ProviderPresets.configuration(id: "minimax")!, apiKey: "test",
+        input: .init(model: "MiniMax-M3", prompt: "开会", tools: TodoTools.all, turns: [
+            .assistant(text: nil, toolCalls: [
+                .init(id: "a", name: "current_time", argumentsJSON: "{}"),
+                .init(id: "b", name: "resolve_time", argumentsJSON: #"{"expression":"今天"}"#)
+            ]),
+            .toolResult(.init(callID: "a", name: "current_time", contentJSON: "{}")),
+            .toolResult(.init(callID: "b", name: "resolve_time", contentJSON: "{}"))
+        ])
+    )
+    #expect(output.text.isEmpty && output.toolCalls.count == 1)
+    let request = try #require(await transport.lastRequest())
+    let root = try #require(try JSONSerialization.jsonObject(with: request.body!) as? [String: Any])
+    let messages = try #require(root["messages"] as? [[String: Any]])
+    #expect(messages.count == 3)
+    let results = try #require(messages.last?["content"] as? [[String: Any]])
+    #expect(results.count == 2)
+    #expect(results.map { $0["tool_use_id"] as? String } == ["a", "b"])
+}

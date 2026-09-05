@@ -97,7 +97,8 @@ public enum TodoTools {
         """,
         parametersJSON: #"""
         {"type":"object","properties":{
-          "expression":{"type":"string","description":"原文里的时间表达，逐字复制，例如「明天早上七点」"}
+          "expression":{"type":"string","description":"原文里的时间表达，逐字复制，例如「明天早上七点」"},
+          "kind":{"type":"string","enum":["appointment","deadline","general"],"description":"仅日期未给钟点时的语义：日程上午九点，截止当日结束，未知返回待确认"}
         },"required":["expression"]}
         """#
     )
@@ -116,8 +117,9 @@ public enum TodoTools {
           "service":{"type":"string","description":"商家或平台原名，例如「麦当劳」"},
           "code":{"type":"string","description":"取餐码/取件码/订单号，必须逐字来自原文"},
           "evidence":{"type":"string","description":"支撑这一条的最短原文片段，逐字复制"},
-          "needsConfirmation":{"type":"boolean","description":"语义明确且证据直接时为 false"}
-        },"required":["title","evidence"]}
+          "highUncertainty":{"type":"boolean","description":"仅主体/指代/OCR/时间存在严重歧义时 true；普通明确任务必须 false"},
+          "uncertaintyReason":{"type":"string","description":"highUncertainty=true 时必填，说明具体冲突"}
+        },"required":["title","evidence","highUncertainty"]}
         """#
     )
 
@@ -128,8 +130,10 @@ public enum TodoTools {
         {"type":"object","properties":{
           "todo":{"type":"integer","description":"清单里的编号"},
           "dueAt":{"type":"string"},
-          "evidence":{"type":"string"}
-        },"required":["todo","dueAt","evidence"]}
+          "evidence":{"type":"string"},
+          "highUncertainty":{"type":"boolean","description":"仅指代/主体/时间严重歧义时 true"},
+          "uncertaintyReason":{"type":"string","description":"highUncertainty=true 时必填"}
+        },"required":["todo","dueAt","evidence","highUncertainty"]}
         """#
     )
 
@@ -216,11 +220,19 @@ public enum TodoTools {
                     ])
                 )
             }
-            // 没写钟点的截止类说法（"周五交"）按当天 23:59 处理，和本地
-            // 确定性层同一条规则；模型仍可按语境自己覆盖。
-            let resolved = reference.hasExplicitTime
-                ? reference.date
-                : ChineseDateParser.endOfDay(reference.date, calendar: calendar)
+            let resolved: Date
+            if reference.hasExplicitTime {
+                resolved = reference.date
+            } else if let hour = [
+                ("早上", 9), ("上午", 9), ("中午", 12), ("下午", 14),
+                ("傍晚", 18), ("晚上", 19)
+            ].first(where: { expression.contains($0.0) })?.1 {
+                resolved = calendar.date(bySettingHour: hour, minute: 0, second: 0, of: reference.date) ?? reference.date
+            } else if call.arguments()["kind"] as? String == "appointment" {
+                resolved = calendar.date(bySettingHour: 9, minute: 0, second: 0, of: reference.date) ?? reference.date
+            } else {
+                resolved = ChineseDateParser.endOfDay(reference.date, calendar: calendar)
+            }
             return AIToolResult(
                 callID: call.id,
                 name: call.name,

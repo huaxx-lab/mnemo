@@ -42,6 +42,8 @@ public struct ArchivedItem: Identifiable, Codable, Sendable, Equatable {
     public var modifiedAt: Date
     public var trashedAt: Date?
     public var titledLocally: Bool
+    public var titleOrigin: String?
+    public var linkExtractionVersion: Int?
     public var origin: ItemOrigin
     public var isPinned: Bool
     public var originalFilename: String?
@@ -61,6 +63,8 @@ public struct ArchivedItem: Identifiable, Codable, Sendable, Equatable {
         modifiedAt = item.modifiedAt
         trashedAt = item.trashedAt
         titledLocally = item.titledLocally
+        titleOrigin = item.titleOrigin
+        linkExtractionVersion = item.linkExtractionVersion
         origin = item.origin
         isPinned = item.isPinned
         originalFilename = item.originalFilename
@@ -90,6 +94,8 @@ public struct ArchivedItem: Identifiable, Codable, Sendable, Equatable {
             modifiedAt: modifiedAt,
             trashedAt: trashedAt,
             titledLocally: titledLocally,
+            titleOrigin: titleOrigin,
+            linkExtractionVersion: linkExtractionVersion,
             origin: origin,
             isPinned: isPinned,
             originalFilename: originalFilename,

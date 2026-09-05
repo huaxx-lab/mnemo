@@ -24,6 +24,8 @@ public extension Item {
         value.contentHash = nil
         value.embeddingModelID = nil
         value.indexedAt = nil
+        value.titleOrigin = nil
+        value.linkExtractionVersion = nil
         value.cloudSystemFields = nil
         return value
     }

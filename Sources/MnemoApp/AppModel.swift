@@ -86,6 +86,7 @@ final class AppModel {
     enum EdgeStatusSignal: Hashable {
         case focusCompleted
         case indexingFailed
+        case todoCreated
     }
 
     enum Tab: Hashable {
@@ -94,6 +95,11 @@ final class AppModel {
         /// 隐私空间。它是一个页签而不是一块新面板——面板一共 212 点高，
         /// 任何新增的常驻区域都在跟卡片抢地方，而页签栏本来就横向滚动。
         case privateSpace
+
+        var kind: ItemKind? {
+            if case .kind(let value) = self { return value }
+            return nil
+        }
 
         var label: String {
             switch self {
@@ -130,8 +136,6 @@ final class AppModel {
     private static let autoGroupingKey = "Pinland.autoGrouping"
     static let launchAtLoginKey = "Pinland.launchAtLogin"
     private static let expandTriggerKey = "Pinland.notchExpandTrigger"
-    private static let processesTemporaryClipboardKey = "Pinland.processesTemporaryClipboard"
-    private static let processableTemporaryIDsKey = "Pinland.processableTemporaryClipboardIDs"
     private static let todoIntakeKey = "Pinland.todoIntakeEnabled"
     private static let todoAutoCreateKey = "Pinland.todoAutoCreateFromClipboard"
     private static let screenshotTodoScanKey = "Pinland.screenshotTodoScanEnabled"
@@ -253,6 +257,7 @@ final class AppModel {
     func setPrivate(_ ids: [UUID], isPrivate: Bool) async {
         guard !ids.isEmpty else { return }
         do {
+            if isPrivate { for id in ids { cancelQueuedAI(for: id) } }
             for id in ids { try await library.setPrivate(id: id, isPrivate: isPrivate) }
             selectedIDs.subtract(ids)
             await reload()
@@ -456,17 +461,10 @@ final class AppModel {
     var isPinnedOpen = false
     private(set) var inboundPayloadKind: InboundPayloadKind = .unknown
     private(set) var edgeStatusSignal: EdgeStatusSignal?
-    /// 自动捕获、尚未固定的剪贴板截图 / 文字要不要立即跑 OCR / AI / Embedding。
-    /// 默认 false：临时轨道只负责保留，固定后或主动拖入才进入完整处理。
+    /// 兼容旧设置绑定；Mac 临时内容现在固定为只保存、不处理。
     var processesTemporaryClipboard: Bool {
-        didSet {
-            UserDefaults.standard.set(
-                processesTemporaryClipboard,
-                forKey: Self.processesTemporaryClipboardKey
-            )
-            // 只影响从这一刻以后新捕获的条目。已有队列、已有索引与旧临时项
-            // 全部保持原状，不全量补跑，也不撤销正在进行的任务。
-        }
+        get { false }
+        set { UserDefaults.standard.removeObject(forKey: "Pinland.processesTemporaryClipboard") }
     }
 
     /// 用户在设置里钉死的浏览器。
@@ -573,35 +571,12 @@ final class AppModel {
     /// 确凿的**直接建**，只留一个叉用来撤销；拿不准的才问，而"问"就是
     /// 一个对号一个叉，不是一段话加两个按钮。
     enum TodoPrompt: Equatable {
-        case created(TodoRevisionPlan, undo: TodoUndo)
-        /// 来源随待确认提案一起保留。用户稍后点 ✓ 时，新待办仍能关联回原 Pin。
         case asking(TodoRevisionPlan, sourceItemID: UUID?)
-
         var plan: TodoRevisionPlan {
-            switch self {
-            case .created(let plan, _), .asking(let plan, _): plan
-            }
+            switch self { case .asking(let plan, _): plan }
         }
-
-        /// 卡片右端有几个按钮。已经替你做完的只有“撤销”一个。
-        var actionCount: Int {
-            switch self {
-            case .created: 1
-            case .asking: 2
-            }
-        }
-    }
-
-    /// 撤销一次已经执行的改动需要什么。
-    ///
-    /// 只有"确凿到不必问"的那几种动作会走到这里，所以只有两种：新建和改期。
-    /// 完成和取消永远要用户先点头，不存在需要撤销的情况。
-    enum TodoUndo: Equatable {
-        case deleteTodo(UUID)
-        case restoreDueDate(UUID, Date?, TodoPresentationMetadata?)
-        case restoreTitle(UUID, String, Date?, TodoPresentationMetadata?)
-        /// 已确认且不提供撤销（完成 / 取消）；让调用方仍能区分成功与失败。
-        case confirmed
+        var transitionID: String { plan.id }
+        var actionCount: Int { 2 }
     }
 
     private(set) var todoPrompt: TodoPrompt?
@@ -611,7 +586,8 @@ final class AppModel {
         var fromNearbyDevice: Bool
         var deviceKind: NearbyDeviceKind
     }
-    @ObservationIgnored private var queuedTodoPrompts: [QueuedTodoPrompt] = []
+    private var queuedTodoPrompts: [QueuedTodoPrompt] = []
+    var remainingTodoPromptCount: Int { queuedTodoPrompts.count }
     /// 这条候选来自其他苹果设备（iPhone / iPad 的通用剪贴板）。
     private(set) var todoDraftCameFromNearbyDevice = false
     /// 候选卡上画哪一个设备角标。系统不给型号，拿不准就是 unknown。
@@ -620,7 +596,7 @@ final class AppModel {
     /// 都只打扰用户一次。
     @ObservationIgnored private var handledTodoDraftIDs: Set<String> = []
     @ObservationIgnored private var todoDraftDismissTask: Task<Void, Never>?
-    @ObservationIgnored private var isMutatingTodoPrompt = false
+    private(set) var isMutatingTodoPrompt = false
     /// 一次待办理解的输入。排队而不是互相取消——两张截图前后脚到达时，
     /// 旧实现会让第二张把第一张的模型调用 cancel 掉，第一张就此消失。
     struct TodoIntakeJob: Equatable {
@@ -696,7 +672,6 @@ final class AppModel {
         defaults.set(edgeStatusEffectsEnabled, forKey: Self.edgeStatusEffectsKey)
         defaults.set(autoGroupingEnabled, forKey: Self.autoGroupingKey)
         defaults.set(expandTrigger.rawValue, forKey: Self.expandTriggerKey)
-        defaults.set(processesTemporaryClipboard, forKey: Self.processesTemporaryClipboardKey)
         defaults.set(todoIntakeEnabled, forKey: Self.todoIntakeKey)
         defaults.set(todoAutoCreateEnabled, forKey: Self.todoAutoCreateKey)
         defaults.set(screenshotTodoScanEnabled, forKey: Self.screenshotTodoScanKey)
@@ -773,8 +748,6 @@ final class AppModel {
     @ObservationIgnored var todoRevisionAction: (
         (String, [TodoRevisionCandidate]) async -> TodoInterpretation
     )?
-    /// 捕获当时开关为开的临时条目；开关后续变化不追溯修改这些 ID。
-    private var processableTemporaryIDs: Set<UUID> = []
     private var indexRetryAttempt = 0
 
     init(entitlementGate: any EntitlementChecking = OpenEntitlementGate()) {
@@ -793,9 +766,6 @@ final class AppModel {
         launchesAtLogin = LaunchAtLogin.isEnabled
         expandTrigger = (defaults.string(forKey: Self.expandTriggerKey))
             .flatMap(NotchExpandTrigger.init(rawValue:)) ?? .click
-        processesTemporaryClipboard = defaults.object(
-            forKey: Self.processesTemporaryClipboardKey
-        ) as? Bool ?? false
         todoIntakeEnabled = defaults.object(forKey: Self.todoIntakeKey) as? Bool ?? true
         todoAutoCreateEnabled = defaults.object(forKey: Self.todoAutoCreateKey) as? Bool ?? false
         screenshotTodoScanEnabled = defaults.object(
@@ -847,17 +817,8 @@ final class AppModel {
         }
         pendingAIIDs = defaults.stringArray(forKey: Self.aiQueueKey)?
             .compactMap(UUID.init(uuidString:)) ?? []
-        if let saved = defaults.stringArray(forKey: Self.processableTemporaryIDsKey) {
-            processableTemporaryIDs = Set(saved.compactMap(UUID.init(uuidString:)))
-        } else {
-            // 新字段第一次出现：升级前已经排队的工作保持原样继续，不能因默认开关
-            // 为关就撤掉。只从这次启动之后的新捕获开始执行"捕获时授权"规则。
-            processableTemporaryIDs = Set(pendingIndexIDs + pendingAIIDs)
-            defaults.set(
-                processableTemporaryIDs.map(\.uuidString).sorted(),
-                forKey: Self.processableTemporaryIDsKey
-            )
-        }
+        defaults.removeObject(forKey: "Pinland.processableTemporaryClipboardIDs")
+        defaults.removeObject(forKey: "Pinland.processesTemporaryClipboard")
         if let data = defaults.data(forKey: Self.sceneCacheKey),
            let saved = try? JSONDecoder().decode([String: SceneCacheEntry].self, from: data) {
             sceneRecommendationCache = Dictionary(uniqueKeysWithValues: saved.compactMap { key, value in
@@ -892,7 +853,7 @@ final class AppModel {
     ///
     /// 隐私条目在这里被摘掉，与解不解锁无关：解锁只是让你在界面上看得见，
     /// 不代表可以把它们发给模型。锁只挡眼睛，这一层才挡住真正的后门。
-    var aiEligibleItems: [Item] { items.filter { !$0.isPrivate } }
+    var aiEligibleItems: [Item] { items.filter(shouldProcessContent) }
 
     var pinnedItems: [Item] { items.filter(\.isPinned) }
 
@@ -1413,12 +1374,8 @@ final class AppModel {
         // 顶部胶囊属于「全部」页，所以数字必须等于全部页真正能看到的活跃成员：
         // 回收站和隐私成员不计数。少于两张就不显示这个分组入口——一张卡不是组，
         // 更不能显示「3」点进去却只看到一张。
-        let visible = Set(items.lazy.filter { !$0.isPrivate }.map(\.id))
-        return cardGroups.compactMap { group in
-            let members = group.itemIDs.filter { visible.contains($0) }
-            guard members.count >= 2 else { return nil }
-            return CardGroup(id: group.id, name: group.name, itemIDs: members)
-        }
+        let alive = Set(items.lazy.filter { $0.state == .active && !$0.isPrivate }.map(\.id))
+        return cardGroups.compactMap { $0.visible(keeping: alive) }
     }
 
     /// 条目 → 它所在的组。
@@ -1554,7 +1511,7 @@ final class AppModel {
     /// 认出主题，而全文会让每一次归类都变成一次昂贵调用。
     private func groupingSummary(of item: Item) -> String {
         var parts = [item.title]
-        if let group = item.group { parts.append(group) }
+        if let group = item.group { parts.append("主题分类（不是卡片分组）：\(group)") }
         if !item.tags.isEmpty { parts.append(item.tags.joined(separator: "、")) }
         if case .inline(let text) = item.holding {
             parts.append(String(text.prefix(200)))
@@ -1583,14 +1540,18 @@ final class AppModel {
               cardGroup(of: itemID) == nil,
               let item = items.first(where: { $0.id == itemID }),
               shouldProcessContent(item) else { return }
-        let groups = cardGroups
+        let generation = cardGroupGeneration
+        let groups = computedCardGroups
         guard !groups.isEmpty else { return }
         guard let index = await action(groupingSummary(of: item), groups.map(\.name)),
               groups.indices.contains(index) else { return }
         // 等模型回来的这段时间里，用户可能已经自己把它归好、或者把那个组
         // 解散了。落地前重新确认一遍。
-        guard cardGroup(of: itemID) == nil,
-              let target = cardGroups.first(where: { $0.id == groups[index].id }),
+        guard generation == cardGroupGeneration, autoGroupingEnabled,
+              !deferStructuralChanges,
+              let latest = items.first(where: { $0.id == itemID }),
+              shouldProcessContent(latest), cardGroup(of: itemID) == nil,
+              let target = computedCardGroups.first(where: { $0.id == groups[index].id }),
               let anchor = target.itemIDs.first else { return }
         guard let groupID = CardGroupStore.merge(
             itemID, into: anchor, defaultName: target.name
@@ -1783,7 +1744,7 @@ final class AppModel {
             // 手动分组是「全部」页的组织层。分类页（尤其链接页）已经有自己
             // 的平台筛选，那里成员按普通卡显示；不能又折成分组瓦片，点进去却
             // 因分类过滤看不到完整成员。
-            if activeTab == .all,
+            if CardGroupProjection.shouldFold(tabKind: activeTab.kind),
                let group = groupIndex[item.id], activeCardGroup == nil {
                 guard seenGroups.insert(group.id).inserted else { continue }
                 let members = group.itemIDs.compactMap { byID[$0] }
@@ -2838,6 +2799,7 @@ final class AppModel {
            (activeTodoIntakeSourceID == sourceItemID
             || todoIntakeQueue.contains(where: { $0.sourceItemID == sourceItemID })) { return }
 
+        if feedbackMessage == "已锁定保留" { feedbackMessage = nil }
         todoIntakeQueue.append(TodoIntakeJob(
             text: body,
             sourceItemID: sourceItemID,
@@ -2870,7 +2832,7 @@ final class AppModel {
                 self.isRecognizingTodos = !self.todoIntakeQueue.isEmpty
                 if !self.todoIntakeQueue.isEmpty { self.drainTodoIntake() }
             }
-            while self.todoIntakeEnabled, !self.todoIntakeQueue.isEmpty {
+            while !Task.isCancelled, self.todoIntakeEnabled, !self.todoIntakeQueue.isEmpty {
                 let job = self.todoIntakeQueue.removeFirst()
                 self.activeTodoIntakeSourceID = job.sourceItemID
                 let generation = self.todoIntakeGeneration
@@ -2887,6 +2849,12 @@ final class AppModel {
     /// - 没配路由：同样划掉——重试一百次也是同样结果，只用本地规则；
     /// - 这次失败：**留在名单里**，等网络恢复或下次启动再来一遍。
     private func processTodoIntake(_ job: TodoIntakeJob, generation: UInt64) async {
+        if let id = job.sourceItemID {
+            guard let source = try? await library.item(id: id), shouldProcessContent(source) else {
+                pendingTodoScanIDs.remove(id)
+                return
+            }
+        }
         let text = job.text
         let now = job.enqueuedAt
         let snapshot = todos
@@ -2923,18 +2891,12 @@ final class AppModel {
                 // 本地逐字命中的结构化码比模型漏判更可靠。只补模型尚未覆盖的
                 // 确凿码类，不用本地场景词复活普通日程。
                 plans = normalizedPlans(from: plans + localPlans.filter(\.isCertain))
-                // 模型一条都没给，本地却有凭据：以本地为准。
-                //
-                // "答了但答的是空"和"没答"在结果上分不开，而本地这一侧的门槛
-                // 并不低——要有明确的未来日期，还要么命中线索词、要么整段排成
-                // 一张日程清单。一张写着四条日程的通知截图，模型偶尔会整段
-                // 略过；那时候把本地结果一起丢掉，用户看到的就是"什么都没识别"。
-                if plans.isEmpty { plans = localPlans }
+                // 空结论不再重跑旧 JSON 理解器；确凿码仍可本地补齐。
             case .unavailable:
                 plans = localPlans
             case .failed(let reason):
                 ContextTrace.log("待办理解失败，保留重试：\(reason)")
-                plans = localPlans
+                plans = localPlans.filter(\.isCertain)
                 shouldSettleSource = false
             }
         } else {
@@ -2943,7 +2905,10 @@ final class AppModel {
 
         // 模型调用期间用户可能关闭了识别或主动收起全部候选。旧一轮不能越过
         // 这道 generation barrier 去自动创建，也不能把已经清空的队列重新弹出来。
-        guard todoIntakeEnabled, generation == todoIntakeGeneration else { return }
+        guard !Task.isCancelled, todoIntakeEnabled, generation == todoIntakeGeneration else { return }
+        if let id = job.sourceItemID {
+            guard let source = try? await library.item(id: id), shouldProcessContent(source) else { return }
+        }
         if shouldSettleSource, let sourceItemID = job.sourceItemID {
             pendingTodoScanIDs.remove(sourceItemID)
         }
@@ -3199,11 +3164,15 @@ final class AppModel {
             TodoPresentationStore.record(itemID: sourceItemID, plan: primary)
         }
         for plan in plans {
-            guard todoIntakeEnabled, !handledTodoDraftIDs.contains(plan.id) else { continue }
+            guard !Task.isCancelled, todoIntakeEnabled else { return }
+            guard !handledTodoDraftIDs.contains(plan.id) else { continue }
             ContextTrace.log(
                 "待办提案 \(plan.summary)（\(plan.isCertain ? "确凿" : "待确认")）：\(plan.title)"
             )
 
+            if let sourceItemID {
+                guard let source = try? await library.item(id: sourceItemID), shouldProcessContent(source) else { return }
+            }
             let autoCreateOverride: Bool = {
                 guard todoAutoCreateEnabled else { return false }
                 if case .create = plan.revision { return true }
@@ -3212,13 +3181,10 @@ final class AppModel {
             let mayAutoApply = !plan.revision.requiresExplicitConfirmation
                 && (plan.isCertain || autoCreateOverride)
             if mayAutoApply {
-                guard let undo = await apply(plan, sourceItemID: sourceItemID) else { continue }
+                guard await apply(plan, sourceItemID: sourceItemID) else { continue }
                 handledTodoDraftIDs.insert(plan.id)
-                enqueueTodoPrompt(.init(
-                    prompt: .created(plan, undo: undo),
-                    fromNearbyDevice: fromNearbyDevice,
-                    deviceKind: deviceKind
-                ))
+                // 明确任务只给刘海边缘一个短促冷色亮光，不弹成功卡。
+                showEdgeStatus(.todoCreated, duration: 1.15)
             } else {
                 handledTodoDraftIDs.insert(plan.id)
                 enqueueTodoPrompt(.init(
@@ -3254,13 +3220,12 @@ final class AppModel {
     }
 
     private func showTodoPrompt(_ queued: QueuedTodoPrompt) {
+        // 待办状态比普通入库 toast 更具体；清掉它，避免两张胶囊互相覆盖。
+        if feedbackMessage == "已锁定保留" { feedbackMessage = nil }
         todoPrompt = queued.prompt
         todoDraftCameFromNearbyDevice = queued.fromNearbyDevice
         todoDraftDeviceKind = queued.deviceKind
-        switch queued.prompt {
-        case .created: scheduleTodoPromptDismissal(after: 6)
-        case .asking: scheduleTodoPromptDismissal(after: 12)
-        }
+        todoDraftDismissTask?.cancel()
     }
 
     private func showNextTodoPromptIfNeeded() {
@@ -3273,9 +3238,15 @@ final class AppModel {
         resumeTodoPromptIfNeeded()
     }
 
-    /// 执行一条提案，返回撤销所需的信息。已有待办在执行前重新核对标题、完成
-    /// 状态和旧时间；候选等待期间用户若已经手动修改，旧计划就不再覆盖新状态。
-    private func apply(_ plan: TodoRevisionPlan, sourceItemID: UUID?) async -> TodoUndo? {
+    /// 执行一条提案。已有待办在执行前重新核对标题、完成状态和旧时间；
+    /// 候选等待期间用户若已经手动修改，旧计划就不再覆盖新状态。
+    private func apply(_ plan: TodoRevisionPlan, sourceItemID: UUID?) async -> Bool {
+        if let sourceItemID {
+            guard let source = try? await library.item(id: sourceItemID), shouldProcessContent(source) else {
+                lastError = "来源已经删除、转为临时或移入隐私空间，本次不执行"
+                return false
+            }
+        }
         switch plan.revision {
         case .create(let draft):
             do {
@@ -3289,10 +3260,10 @@ final class AppModel {
                 TodoPresentationStore.record(todoID: todo.id, plan: plan)
                 await reload()
                 rescheduleReminders()
-                return .deleteTodo(todo.id)
+                return true
             } catch {
                 lastError = "加入待办失败：\(error.localizedDescription)"
-                return nil
+                return false
             }
 
         case .reschedule(let id, let title, let from, let to):
@@ -3301,7 +3272,7 @@ final class AppModel {
                   todo.title == title,
                   !TodoReconciler.differsMeaningfully(todo.dueAt, from) else {
                 lastError = "待办已发生变化，请根据最新状态重新识别"
-                return nil
+                return false
             }
             let previousMetadata = TodoPresentationStore.todo(id)
             todo.dueAt = to
@@ -3309,12 +3280,12 @@ final class AppModel {
                 try await library.updateTodo(todo)
             } catch {
                 lastError = "截止日期更新失败：\(error.localizedDescription)"
-                return nil
+                return false
             }
             TodoPresentationStore.record(todoID: id, plan: plan)
             await reload()
             rescheduleReminders()
-            return .restoreDueDate(id, from, previousMetadata)
+            return true
 
         case .rename(let id, let from, let to, let dueAt, let previousDueAt):
             guard var todo = todos.first(where: { $0.id == id }),
@@ -3322,7 +3293,7 @@ final class AppModel {
                   todo.title == from,
                   !TodoReconciler.differsMeaningfully(todo.dueAt, previousDueAt) else {
                 lastError = "待办已发生变化，请根据最新状态重新识别"
-                return nil
+                return false
             }
             let previousMetadata = TodoPresentationStore.todo(id)
             todo.title = to
@@ -3331,58 +3302,40 @@ final class AppModel {
                 try await library.updateTodo(todo)
             } catch {
                 lastError = "待办更新失败：\(error.localizedDescription)"
-                return nil
+                return false
             }
             TodoPresentationStore.record(todoID: id, plan: plan)
             await reload()
             rescheduleReminders()
-            return .restoreTitle(id, from, previousDueAt, previousMetadata)
+            return true
 
         case .complete(let id, let title):
             guard var todo = todos.first(where: { $0.id == id }),
                   !todo.isCompleted, todo.title == title else {
                 lastError = "待办已发生变化，请根据最新状态重新识别"
-                return nil
+                return false
             }
             todo.isCompleted = true
             do {
                 try await library.updateTodo(todo)
             } catch {
                 lastError = "待办更新失败：\(error.localizedDescription)"
-                return nil
+                return false
             }
             TodoPresentationStore.record(todoID: id, plan: plan)
             await reload()
             rescheduleReminders()
-            return .confirmed
+            return true
 
         case .cancel(let id, let title):
             guard let todo = todos.first(where: { $0.id == id }),
                   !todo.isCompleted, todo.title == title else {
                 lastError = "待办已发生变化，请根据最新状态重新识别"
-                return nil
+                return false
             }
-            guard await deleteTodo(id, cascadesToSource: true) else { return nil }
+            guard await deleteTodo(id, cascadesToSource: true) else { return false }
             rescheduleReminders()
-            return .confirmed
-        }
-    }
-
-    /// 卡片只有真的处于最高优先级、可见且可点击时才开始倒计时。被提醒或回答
-    /// 盖住时暂停，避免用户从未见过候选，它却已经超时消失。
-    private func scheduleTodoPromptDismissal(after seconds: Double) {
-        todoDraftDismissTask?.cancel()
-        todoDraftDismissTask = Task { [weak self] in
-            var remaining = seconds
-            while remaining > 0 {
-                try? await Task.sleep(for: .milliseconds(250))
-                guard !Task.isCancelled, let self else { return }
-                guard self.canShowTodoPrompt, self.todoPrompt != nil else { continue }
-                remaining -= 0.25
-            }
-            guard let self else { return }
-            self.removeCurrentTodoPrompt()
-            self.showNextTodoPromptIfNeeded()
+            return true
         }
     }
 
@@ -3398,76 +3351,18 @@ final class AppModel {
             defer { self.isMutatingTodoPrompt = false }
             guard case .asking(let current, _)? = self.todoPrompt,
                   current.id == plan.id else { return }
-            guard await self.apply(plan, sourceItemID: sourceItemID) != nil else {
-                self.scheduleTodoPromptDismissal(after: 12)
-                return
-            }
+            guard await self.apply(plan, sourceItemID: sourceItemID) else { return }
             self.removeCurrentTodoPrompt()
-            self.showTransientFeedback("\(plan.summary)：\(plan.title)")
+            self.showEdgeStatus(.todoCreated, duration: 1.15)
             self.showNextTodoPromptIfNeeded()
         }
     }
 
-    /// 叉。`.asking` 时是“这次不办”，`.created` 时是“撤销刚才那一下”。
+    /// 叉：非常不确定时用户明确忽略这项。
     func rejectTodoPrompt() {
-        guard !isMutatingTodoPrompt, let prompt = todoPrompt else { return }
-        todoDraftDismissTask?.cancel()
-        guard case .created(let plan, let undo) = prompt else {
-            removeCurrentTodoPrompt()
-            showNextTodoPromptIfNeeded()
-            return
-        }
-        isMutatingTodoPrompt = true
-        Task { [weak self] in
-            guard let self else { return }
-            defer { self.isMutatingTodoPrompt = false }
-            guard case .created(let current, _)? = self.todoPrompt,
-                  current.id == plan.id else { return }
-            guard await self.undo(undo) else {
-                self.scheduleTodoPromptDismissal(after: 6)
-                return
-            }
-            self.removeCurrentTodoPrompt()
-            self.rescheduleReminders()
-            self.showTransientFeedback("已撤销：\(plan.title)")
-            self.showNextTodoPromptIfNeeded()
-        }
-    }
-
-    private func undo(_ undo: TodoUndo) async -> Bool {
-        switch undo {
-        case .deleteTodo(let id):
-            // 撤销自动新建只收回待办，不动来源；删除成功后 helper 才会忘记溯源。
-            return await deleteTodo(id, cascadesToSource: false)
-
-        case .restoreDueDate(let id, let date, let metadata):
-            guard var todo = todos.first(where: { $0.id == id }) else { return false }
-            todo.dueAt = date
-            do { try await library.updateTodo(todo) }
-            catch {
-                lastError = "撤销失败：\(error.localizedDescription)"
-                return false
-            }
-            TodoPresentationStore.restore(todoID: id, metadata: metadata)
-            await reload()
-            return true
-
-        case .restoreTitle(let id, let title, let dueAt, let metadata):
-            guard var todo = todos.first(where: { $0.id == id }) else { return false }
-            todo.title = title
-            todo.dueAt = dueAt
-            do { try await library.updateTodo(todo) }
-            catch {
-                lastError = "撤销失败：\(error.localizedDescription)"
-                return false
-            }
-            TodoPresentationStore.restore(todoID: id, metadata: metadata)
-            await reload()
-            return true
-
-        case .confirmed:
-            return true
-        }
+        guard !isMutatingTodoPrompt, todoPrompt != nil else { return }
+        removeCurrentTodoPrompt()
+        showNextTodoPromptIfNeeded()
     }
 
     /// 点到外面只处理眼前真正可见的卡。提醒覆盖待办时，外点收起提醒并恢复
@@ -3507,11 +3402,8 @@ final class AppModel {
     }
 
     private func resumeTodoPromptIfNeeded() {
-        if let todoPrompt {
-            switch todoPrompt {
-            case .created: scheduleTodoPromptDismissal(after: 6)
-            case .asking: scheduleTodoPromptDismissal(after: 12)
-            }
+        if todoPrompt != nil {
+            todoDraftDismissTask?.cancel()
         } else {
             showNextTodoPromptIfNeeded()
         }
@@ -4788,9 +4680,7 @@ final class AppModel {
                 // 复制**不再触发推荐**——推荐由 ⌘G 主动发起。这里只判去留：
                 // 有些应用一选中文字就自动写剪贴板，那些片段大多是"我在找什么"，
                 // 留下来会把真正想存的挤出那五条。
-                if processesTemporaryClipboard {
-                    classifyCopiedTextIfNeeded(text: text, itemID: item.id)
-                }
+                // Mac 临时文字不分类、不索引，旧设置与旧授权不能放行。
             case .files:
                 // 复制一个文件通常只是"我要把它粘到别处"，不是"帮我记住它"。
                 // 被动监听到的文件一律不入库；真想收下来有两条明确的路：
@@ -4836,14 +4726,12 @@ final class AppModel {
             for item in captured {
                 NearbyDeviceOrigin.setNearby(isRemote, kind: deviceKind, for: item.id)
             }
-            let processNewCaptures = ClipboardContentProcessingPolicy
-                .authorizesNewTemporaryCapture(isEnabled: processesTemporaryClipboard)
+
             // 手机内容是独立的“到达即识别”路径，但**复用同一条索引管线**：
             // Vision OCR、图片标签、可选视觉描述、Embedding 都只跑一次，随后 RAG
             // 与待办理解读取同一批分块。Mac 临时截图仍然等用户 Pin 后才处理。
-            if processNewCaptures || isRemote {
+            if isRemote {
                 for item in captured {
-                    authorizeTemporaryProcessing(item.id)
                     // 重复内容也可能是开关开启后的新捕获事件；此时从这一刻起授权。
                     // 手机来的图已经带上来源标记，`scheduleAIWork` 会据此排队。
                     scheduleAIWork(for: item)
@@ -4952,6 +4840,13 @@ final class AppModel {
                 scheduleAIWork(for: promoted)
             }
             if !isPinned {
+                removePendingAI(id)
+                removePendingIndex(id)
+                pendingTodoScanIDs.remove(id)
+                linkMetadataTasks[id]?.cancel()
+                if activeAIItemID == id { aiQueueTask?.cancel() }
+                if activeTodoIntakeSourceID == id { todoIntakeTask?.cancel() }
+                todoIntakeQueue.removeAll { $0.sourceItemID == id }
                 // 放回滚动轨道之后立刻按容量结算：否则它会以"临时"的身份多待
                 // 一会儿，下一次复制时才被挤掉，看着像没生效。
                 let evicted = try await library.trimClipboardHistory(
@@ -4961,7 +4856,8 @@ final class AppModel {
                 for item in evicted { cancelQueuedAI(for: item.id) }
             }
             await reload()
-            showTransientFeedback(isPinned ? "已锁定保留" : "已放回临时轨道")
+            // 固定后后台状态会接管反馈，不再用“已锁定保留”覆盖识别过程。
+            if !isPinned { showTransientFeedback("已放回临时轨道") }
         } catch {
             lastError = "\(isPinned ? "固定" : "取消固定")失败：\(error.localizedDescription)"
         }
@@ -5064,34 +4960,14 @@ final class AppModel {
     private func shouldProcessContent(_ item: Item) -> Bool {
         // 隐私条目不参与任何内容处理：不建索引、不问模型、不抓封面、不提待办。
         // 移进来时已经把分块删了，这里保证不会有人再把它建回去。
-        guard !item.isPrivate else { return false }
-        return ClipboardContentProcessingPolicy.shouldProcess(
-            origin: item.origin,
-            isPinned: item.isPinned,
-            wasAuthorizedAtCapture: processableTemporaryIDs.contains(item.id)
-        )
-    }
-
-    private func authorizeTemporaryProcessing(_ id: UUID) {
-        guard processableTemporaryIDs.insert(id).inserted else { return }
-        persistTemporaryProcessingAuthorizations()
-    }
-
-    private func revokeTemporaryProcessing(_ id: UUID) {
-        guard processableTemporaryIDs.remove(id) != nil else { return }
-        persistTemporaryProcessingAuthorizations()
-    }
-
-    private func persistTemporaryProcessingAuthorizations() {
-        UserDefaults.standard.set(
-            processableTemporaryIDs.map(\.uuidString).sorted(),
-            forKey: Self.processableTemporaryIDsKey
+        ClipboardContentProcessingPolicy.permitsBackgroundWork(
+            item, isFromNearbyDevice: NearbyDeviceOrigin.contains(item.id)
         )
     }
 
     private func scheduleAIWork(for item: Item) {
         guard shouldProcessContent(item) else { return }
-        scheduleLinkMetadata(for: item)
+        if !LinkRefreshPolicy.isNote(item.linkURL) { scheduleLinkMetadata(for: item) }
         enqueueTodoScanIfNeeded(item)
         enqueueAI(item)
         enqueueIndex(item.id, item: item)
@@ -5125,6 +5001,7 @@ final class AppModel {
             guard screenshotTodoScanEnabled else { return }
             pendingTodoScanIDs.insert(item.id)
         case .text:
+            pendingTodoScanIDs.insert(item.id)
             // 文字是内联的，没有"等 OCR"这一步，直接理解。
             // 固定一条剪贴板文字就是明确的"留下它"，和固定截图同一个语义。
             guard case .inline(let body) = item.holding else { return }
@@ -5143,11 +5020,11 @@ final class AppModel {
         forceRefresh: Bool = false,
         updateTitle: Bool = true
     ) {
-        guard shouldProcessContent(item) else { return }
+        guard shouldProcessContent(item), !LinkRefreshPolicy.isNote(item.linkURL) else { return }
         // 标题只在还没定下来时补，封面则是"没有就补"——两件事的触发条件不同。
         // 原来共用 titledLocally 一个判据，导致标题一旦解析出来，封面就永远
         // 没机会再抓，已有的链接全是通用图标。
-        let needsCover = forceRefresh || LinkCoverStore.cachedImage(for: item.id) == nil
+        let needsCover = forceRefresh || !FileManager.default.fileExists(atPath: LinkCoverStore.url(for: item.id).path)
         guard item.kind == .link,
               forceRefresh || item.titledLocally || needsCover,
               linkMetadataTasks[item.id] == nil,
@@ -5159,6 +5036,8 @@ final class AppModel {
             guard !Task.isCancelled, let self else { return }
             defer { self.linkMetadataTasks[item.id] = nil }
 
+            guard let live = try? await self.library.item(id: item.id),
+                  self.shouldProcessContent(live), live.holding == item.holding else { return }
             // 封面和标题各自独立：抓到哪个算哪个。
             let hadOCRSources = !LinkCoverStore.ocrSourceURLs(for: item.id).isEmpty
             var changed = false
@@ -5169,10 +5048,12 @@ final class AppModel {
                 LinkCoverStore.storeOCRSources(preview.ocrImages, for: item.id)
                 changed = true
             }
-            var current = (try? await self.library.items())?.first(where: { $0.id == item.id })
+            var current: Item? = live
             if updateTitle, let title = preview.title,
-               current?.holding == item.holding, current?.titledLocally == true {
+               current?.holding == item.holding, current.map(LinkRefreshPolicy.mayReplaceTitle) == true {
                 current?.title = title
+                current?.titledLocally = false
+                current?.titleOrigin = "page"
                 if let current {
                     try? await self.library.update(current)
                     changed = true
@@ -5196,7 +5077,7 @@ final class AppModel {
         var budget = 4
         for item in items where item.kind == .link && budget > 0 {
             guard shouldProcessContent(item),
-                  LinkCoverStore.cachedImage(for: item.id) == nil,
+                  !FileManager.default.fileExists(atPath: LinkCoverStore.url(for: item.id).path),
                   linkMetadataTasks[item.id] == nil else { continue }
             budget -= 1
             scheduleLinkMetadata(for: item)
@@ -5237,9 +5118,10 @@ final class AppModel {
                 // 图片/PDF/文件要先有本地索引（OCR、视觉标签、页块文本）再命名：
                 // 没有提取文本时 prompt 只有"类型+文件名"，模型只能回一个通用标题。
                 // 留在队列里，索引完成的钩子会重新唤起这轮处理。
-                if [.image, .pdf, .file].contains(item.kind) {
+                if [.image, .pdf, .file, .link].contains(item.kind) {
                     let chunks = (try? await self.library.chunks(for: id)) ?? []
                     if chunks.isEmpty { continue }
+                    if item.kind == .link, !chunks.contains(where: { $0.source == .linkPage }) { continue }
                 }
                 self.activeAIItemID = id
                 let trace = PerformanceTrace.begin("AIEnrichment")
@@ -5248,12 +5130,14 @@ final class AppModel {
                 guard !Task.isCancelled else { return }
                 guard let enrichment,
                       var current = try? await self.library.item(id: id),
-                      current.state == .active,
+                      self.shouldProcessContent(current),
                       current.holding == item.holding else { continue }
 
-                if enrichment.didGenerateTitle {
+                if enrichment.didGenerateTitle, current.title == item.title,
+                   current.titledLocally, current.titleOrigin != "user" {
                     current.title = enrichment.title
                     current.titledLocally = false
+                    current.titleOrigin = "ai"
                 }
                 if enrichment.didGenerateClassification {
                     current.group = enrichment.group
@@ -5298,7 +5182,9 @@ final class AppModel {
     }
 
     private func cancelQueuedAI(for id: UUID) {
-        revokeTemporaryProcessing(id)
+        pendingTodoScanIDs.remove(id)
+        todoIntakeQueue.removeAll { $0.sourceItemID == id }
+        if activeTodoIntakeSourceID == id { todoIntakeTask?.cancel() }
         removePendingAI(id)
         if activeAIItemID == id { aiQueueTask?.cancel() }
         linkMetadataTasks[id]?.cancel()
@@ -5434,7 +5320,8 @@ final class AppModel {
                         self.saturateLinkReparseAttempt(id)
                     }
                     self.removePendingIndex(id)
-                    if wasForced, let refreshed = try? await self.library.item(id: id) {
+                    if wasForced, let refreshed = try? await self.library.item(id: id),
+                       !LinkRefreshPolicy.isNote(refreshed.linkURL) {
                         // 正文先成功，再抓封面。取消同 ID 可能还在排队的旧元数据
                         // 任务，确保 forceRefresh 真的执行；被取消任务在写文件前会
                         // 检查 Task.isCancelled，不会反过来覆盖新封面。
@@ -5478,9 +5365,14 @@ final class AppModel {
         // 只判断"在不在名单里"，**不在这里划掉**。真正的结算发生在模型给出
         // 答复之后：过去在发请求前就 remove，一次网络失败这张截图就再也回不来了。
         guard pendingTodoScanIDs.contains(id), todoIntakeEnabled,
-              screenshotTodoScanEnabled,
               let item = try? await library.item(id: id),
-              item.kind == .image else { return }
+              shouldProcessContent(item) else { return }
+        if item.kind == .text, case .inline(let body) = item.holding {
+            considerTodoDraft(in: body, sourceItemID: id,
+                              fromNearbyDevice: NearbyDeviceOrigin.contains(id))
+            return
+        }
+        guard item.kind == .image, screenshotTodoScanEnabled else { return }
         let chunks = (try? await library.chunks(for: id)) ?? []
         // 画面描述是模型写的散文，里面的数字不可当证据；只认 OCR 出来的原文。
         let text = chunks
@@ -5533,7 +5425,6 @@ final class AppModel {
         Task { @MainActor in
             // 手动点击就是明确授权处理这条内容；临时剪贴板链接也不应被
             // shouldProcessContent 拒绝。
-            authorizeTemporaryProcessing(itemID)
 
             // 先停住当前串行索引任务，避免同一条链接同时跑新旧两个版本。
             let running = indexQueueTask
@@ -5618,6 +5509,19 @@ final class AppModel {
         }
         let links = items.filter { $0.kind == .link && shouldProcessContent($0) }
         guard !links.isEmpty else { return }
+        // 单独记迁移额度，不重置普通链接的失败计数，避免重现每次启动补抓循环。
+        let migrationKey = "Pinland.xhsMigration.v5.attempts"
+        var migrationAttempts = defaults.dictionary(forKey: migrationKey) as? [String: Int] ?? [:]
+        let migrating = links.filter {
+            LinkRefreshPolicy.needsMigration($0) && migrationAttempts[$0.id.uuidString, default: 0] < 3
+                && !forcedLinkRefreshIDs.contains($0.id)
+        }.prefix(Self.linkReparseBatch)
+        for link in migrating {
+            migrationAttempts[link.id.uuidString, default: 0] += 1
+            queueForcedLinkRefresh(link.id)
+        }
+        defaults.set(migrationAttempts, forKey: migrationKey)
+        if !migrating.isEmpty { resumeIndexing() }
 
         var candidates: [Item] = []
         for link in links where attempts[link.id.uuidString, default: 0] < Self.linkReparseMaxAttempts {
@@ -5719,12 +5623,12 @@ final class AppModel {
         )
     }
 
-    private func showEdgeStatus(_ signal: EdgeStatusSignal) {
+    private func showEdgeStatus(_ signal: EdgeStatusSignal, duration: Double = 4.5) {
         guard edgeStatusEffectsEnabled else { return }
         edgeStatusTask?.cancel()
         edgeStatusSignal = signal
         edgeStatusTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(4.5))
+            try? await Task.sleep(for: .seconds(duration))
             guard !Task.isCancelled else { return }
             self?.edgeStatusSignal = nil
             self?.edgeStatusTask = nil

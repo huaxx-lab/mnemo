@@ -7,19 +7,6 @@ import MnemoCore
 /// （同一份文档的几个版本），用户没做过任何事；手动分组是**用户自己归的**
 /// （"招聘信息""房子"），程序永远猜不出来。两者判据不同、生命周期不同，
 /// 所以各存各的，只在显示时共用同一套折叠动效。
-struct CardGroup: Identifiable, Codable, Equatable, Sendable {
-    var id: UUID
-    var name: String
-    /// 成员顺序 = 用户放进去的顺序，不重排。
-    var itemIDs: [UUID]
-
-    init(id: UUID = UUID(), name: String, itemIDs: [UUID]) {
-        self.id = id
-        self.name = name
-        self.itemIDs = itemIDs
-    }
-}
-
 /// 分组的存放。
 ///
 /// 不进库表：它是一层纯粹的组织信息，为它给整个库做结构迁移不划算，而且

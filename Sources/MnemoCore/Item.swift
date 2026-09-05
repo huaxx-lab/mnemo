@@ -59,6 +59,9 @@ public struct Item: Identifiable, Sendable, Codable, Equatable {
     public var trashedAt: Date?
     /// 命名是否由本地规则产生（敏感内容命中筛查时为 true，卡片显示「本地处理」徽标）
     public var titledLocally: Bool
+    /// nil 是旧库未知来源；用户手动标题永远不能被自动更新覆盖。
+    public var titleOrigin: String?
+    public var linkExtractionVersion: Int?
     /// 自动剪贴板历史与用户主动收藏必须分开；只有未固定的 clipboard 项
     /// 会参与容量淘汰。
     public var origin: ItemOrigin
@@ -112,6 +115,8 @@ public struct Item: Identifiable, Sendable, Codable, Equatable {
         modifiedAt: Date? = nil,
         trashedAt: Date? = nil,
         titledLocally: Bool = false,
+        titleOrigin: String? = nil,
+        linkExtractionVersion: Int? = nil,
         origin: ItemOrigin = .manual,
         isPinned: Bool = true,
         originalFilename: String? = nil,
@@ -138,6 +143,8 @@ public struct Item: Identifiable, Sendable, Codable, Equatable {
         self.createdAt = createdAt; self.modifiedAt = modifiedAt ?? createdAt
         self.trashedAt = trashedAt
         self.titledLocally = titledLocally
+        self.titleOrigin = titleOrigin
+        self.linkExtractionVersion = linkExtractionVersion
         self.origin = origin
         self.isPinned = isPinned
         self.originalFilename = originalFilename

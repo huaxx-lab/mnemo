@@ -21,6 +21,8 @@ public final class StoredItem {
     public var modifiedAt: Date = Date.now
     public var trashedAt: Date?
     public var titledLocally: Bool = false
+    public var titleOrigin: String?
+    public var linkExtractionVersion: Int?
     public var originRaw: String = ItemOrigin.manual.rawValue
     public var isPinned: Bool = true
     public var originalFilename: String?
@@ -63,6 +65,8 @@ public final class StoredItem {
         modifiedAt = item.modifiedAt
         trashedAt = item.trashedAt
         titledLocally = item.titledLocally
+        titleOrigin = item.titleOrigin
+        linkExtractionVersion = item.linkExtractionVersion
         originRaw = item.origin.rawValue
         isPinned = item.isPinned
         originalFilename = item.originalFilename
@@ -99,6 +103,8 @@ public final class StoredItem {
             modifiedAt: modifiedAt,
             trashedAt: trashedAt,
             titledLocally: titledLocally,
+            titleOrigin: titleOrigin,
+            linkExtractionVersion: linkExtractionVersion,
             origin: ItemOrigin(rawValue: originRaw) ?? .manual,
             isPinned: isPinned,
             originalFilename: originalFilename,

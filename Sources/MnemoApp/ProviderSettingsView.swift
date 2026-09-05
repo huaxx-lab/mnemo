@@ -1511,26 +1511,6 @@ private struct AppearanceSettingsPage: View {
                 }
 
                 SettingsCard(
-                    title: "临时内容处理",
-                    subtitle: "只影响之后新捕获的截图和文字",
-                    help: "不追溯旧条目，也不撤销已经开始的任务。关闭时新临时内容只保存，固定后才做 OCR、图片理解与 Embedding；人工拖入和显式收纳始终立即处理。"
-                ) {
-                    Toggle(
-                        "自动处理未固定的剪贴板内容",
-                        isOn: $appModel.processesTemporaryClipboard
-                    )
-                    .font(.system(size: 12, weight: .medium))
-                    HStack(spacing: 5) {
-                        Image(systemName: appModel.processesTemporaryClipboard
-                              ? "bolt.fill" : "pin.fill")
-                        Text(appModel.processesTemporaryClipboard
-                             ? "从现在起，新捕获立即处理" : "从现在起，新捕获固定后才处理（默认）")
-                    }
-                    .font(.system(size: 10.5, weight: .medium))
-                    .foregroundStyle(.secondary)
-                }
-
-                SettingsCard(
                     title: "剪贴板临时历史",
                     subtitle: "Mac 与手机各保留最近 5 条，互不挤占；固定 Pin 永不参与淘汰。"
                 ) {

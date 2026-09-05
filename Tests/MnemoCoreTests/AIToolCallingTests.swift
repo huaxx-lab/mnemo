@@ -77,7 +77,6 @@ struct AIToolCallingTests {
 
     @Test("工具调用能翻译成本地决策，字段完整")
     func toolCallBecomesDecision() throws {
-        let formatter = ISO8601DateFormatter()
         let decision = try #require(TodoRevisionPrompt.decision(fromToolCall: AIToolCall(
             id: "c1",
             name: TodoTools.createTodo.name,

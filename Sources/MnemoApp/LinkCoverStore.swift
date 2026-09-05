@@ -14,9 +14,11 @@ enum LinkCoverStore {
     private static let maximumPixelSize: CGFloat = 240
 
     nonisolated private static var directory: URL {
-        let root = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appending(path: "Pinland/link-covers", directoryHint: .isDirectory)
+        let support = ProcessInfo.processInfo.environment["MNEMO_DATA_ROOT"].map {
+            URL(filePath: $0, directoryHint: .isDirectory)
+        } ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appending(path: "Pinland", directoryHint: .isDirectory)
+        let root = support.appending(path: "link-covers", directoryHint: .isDirectory)
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         return root
     }
@@ -70,7 +72,7 @@ enum LinkCoverStore {
             await LinkFetchScheduler.release(lease)
         }
 
-        let title = metadata?.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        var title = metadata?.title?.trimmingCharacters(in: .whitespacesAndNewlines)
         var cover: NSImage?
         var ocrImages: [NSImage] = []
 
@@ -79,9 +81,10 @@ enum LinkCoverStore {
         // 才用 logo」，所以这里不能先信 metadata。图单一次取回：第一张当封面，
         // 整单进检索——清单 / 攻略类笔记的内容分布在好几张图上。
         if platform == .xiaohongshu {
-            let images = await noteImages(for: target)
-            cover = images.first
-            ocrImages = images
+            let note = await noteImages(for: target)
+            title = note.title
+            cover = note.images.first
+            ocrImages = note.images
         }
         // 其他站点优先系统元数据；视频封面常在 videoProvider。
         if cover == nil, let source = metadata?.imageProvider ?? metadata?.videoProvider {
@@ -97,8 +100,16 @@ enum LinkCoverStore {
         return (title.flatMap { $0.isEmpty ? nil : String($0.prefix(80)) }, cover, ocrImages)
     }
 
+    static func refreshForIndex(_ target: URL, itemID: UUID) async -> (title: String?, hasImages: Bool) {
+        let preview = await fetch(for: target)
+        guard !Task.isCancelled else { return (nil, false) }
+        if let cover = preview.cover { store(cover, for: itemID) }
+        let stored = !preview.ocrImages.isEmpty && storeOCRSources(preview.ocrImages, for: itemID)
+        return (preview.title, stored)
+    }
+
     /// 小红书笔记的整单配图。抓一次 HTML，把 imageList 里前几张都取回来。
-    private static func noteImages(for target: URL) async -> [NSImage] {
+    private static func noteImages(for target: URL) async -> (title: String?, images: [NSImage]) {
         var request = URLRequest(url: target, timeoutInterval: 10)
         request.setValue(
             "Mozilla/5.0 (Macintosh; Intel Mac OS X) Mnemo/1.0 (+link preview)",
@@ -109,18 +120,19 @@ enum LinkCoverStore {
               (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) == true,
               let html = String(data: data, encoding: .utf8)
                 ?? String(data: data, encoding: .init(rawValue: 0x80000632))
-        else { return [] }
+        else { return (nil, []) }
         var images: [NSImage] = []
+        let noteTitle = SiteContentExtraction.Xiaohongshu.title(fromHTML: html)
         for imageURL in SiteContentExtraction.Xiaohongshu.noteImageURLs(fromHTML: html) {
             var imageRequest = URLRequest(url: imageURL, timeoutInterval: 10)
             imageRequest.setValue(target.absoluteString, forHTTPHeaderField: "Referer")
             guard let (imageData, imageResponse) = await loadData(imageRequest),
                   (imageResponse as? HTTPURLResponse)
                     .map({ (200..<300).contains($0.statusCode) }) == true,
-                  let image = NSImage(data: imageData), image.size.width > 0 else { continue }
+                  let image = NSImage(data: imageData), image.size.width > 0 else { return (noteTitle, []) }
             images.append(image)
         }
-        return images
+        return (SiteContentExtraction.Xiaohongshu.title(fromHTML: html), images)
     }
 
     @discardableResult
@@ -130,22 +142,32 @@ enum LinkCoverStore {
         return (try? png.write(to: url(for: itemID), options: .atomic)) != nil
     }
 
-    /// 检索用配图落盘：保留看得清小字的分辨率，和 240px 的卡片封面分开存。
-    /// 先清旧图再写——笔记换过图时，不能让上一版多出来的图留在盘里继续被索引。
-    static func storeOCRSources(_ images: [NSImage], for itemID: UUID) {
+    /// 先写完整新一代，再换清单；失败保留上一代图源。
+    @discardableResult
+    static func storeOCRSources(_ images: [NSImage], for itemID: UUID) -> Bool {
+        guard !images.isEmpty else { return false }
         let prefix = "\(itemID.uuidString).ocr-"
-        let stale = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
-        for name in stale where name.hasPrefix(prefix) {
-            try? FileManager.default.removeItem(at: directory.appending(path: name))
-        }
-        for (index, image) in images.enumerated() {
-            guard let scaled = resized(image, maxPixel: ocrMaximumPixelSize),
-                  // JPEG 就够：OCR 认的是笔画边缘，不认 PNG 的无损；文件小一个量级。
-                  let data = bitmapData(scaled, type: .jpeg, quality: 0.85) else { continue }
-            try? data.write(
-                to: directory.appending(path: "\(prefix)\(index).jpg"),
-                options: .atomic
-            )
+        let generation = UUID().uuidString
+        let manifest = directory.appending(path: "\(itemID.uuidString).ocr.json")
+        let old = ocrSourceURLs(for: itemID)
+        var written: [URL] = []
+        do {
+            for (index, image) in images.enumerated() {
+                guard let scaled = resized(image, maxPixel: ocrMaximumPixelSize),
+                      let data = bitmapData(scaled, type: .jpeg, quality: 0.85) else {
+                    throw CocoaError(.fileWriteUnknown)
+                }
+                let url = directory.appending(path: "\(prefix)\(generation)-\(index).jpg")
+                try data.write(to: url, options: .atomic)
+                written.append(url)
+            }
+            let data = try JSONEncoder().encode(written.map(\.lastPathComponent))
+            try data.write(to: manifest, options: .atomic)
+            for url in old { try? FileManager.default.removeItem(at: url) }
+            return true
+        } catch {
+            for url in written { try? FileManager.default.removeItem(at: url) }
+            return false
         }
     }
 
@@ -155,6 +177,12 @@ enum LinkCoverStore {
     /// 好的文件，没必要为此跳一次主线程。
     nonisolated static func ocrSourceURLs(for itemID: UUID) -> [URL] {
         let prefix = "\(itemID.uuidString).ocr-"
+        let manifest = directory.appending(path: "\(itemID.uuidString).ocr.json")
+        if let data = try? Data(contentsOf: manifest),
+           let files = try? JSONDecoder().decode([String].self, from: data) {
+            return files.filter { $0.hasPrefix(prefix) && !$0.contains("/") }
+                .map { directory.appending(path: $0) }
+        }
         let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
         // 下标是个位数（图单有上限），字典序即数值序。
         return names

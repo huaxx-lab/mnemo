@@ -72,9 +72,10 @@ public actor Library {
         var changed = false
         if let title {
             let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty, trimmed != item.title {
+            if !trimmed.isEmpty, trimmed != item.title || item.titleOrigin != "user" {
                 item.title = trimmed
                 item.titledLocally = false
+                item.titleOrigin = "user"
                 changed = true
             }
         }

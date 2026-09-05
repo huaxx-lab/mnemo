@@ -437,8 +437,6 @@ func suggestionDrawerAndHitFramesShareWidth() throws {
 @Test("临时剪贴板处理开关只授权切换后的新捕获，不改变既有条目资格")
 func temporaryClipboardProcessingIsProspective() {
     // 捕获当时开关决定这一条的授权；开关本身不是日后查询资格的实时输入。
-    #expect(!ClipboardContentProcessingPolicy.authorizesNewTemporaryCapture(isEnabled: false))
-    #expect(ClipboardContentProcessingPolicy.authorizesNewTemporaryCapture(isEnabled: true))
 
     // 关闭期间捕获的临时项：不处理。
     #expect(!ClipboardContentProcessingPolicy.shouldProcess(

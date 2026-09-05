@@ -200,7 +200,7 @@ public actor AIExecutionEngine {
                 system: system,
                 prompt: prompt,
                 maxTokens: maxTokens,
-                reasoningEffort: resolution.route.reasoningEffort,
+                reasoningEffort: tools.isEmpty ? resolution.route.reasoningEffort : .off,
                 modelSupportsReasoning: descriptor?.supportsReasoning == true,
                 image: image,
                 tools: tools,

@@ -47,7 +47,7 @@ enum NearbyDeviceKind: String, Codable, Sendable {
 /// 哪些条目是从其他苹果设备的通用剪贴板同步过来的，以及是哪一类设备。
 ///
 /// 不进 SwiftData：这是一条纯展示与路由用的来源标记，为它给整个库做一次
-/// 结构迁移不划算。存法沿用 `processableTemporaryIDs` 那一套——UserDefaults
+/// 结构迁移不划算。存法沿用其他 UserDefaults 旁路映射——UserDefaults
 /// 里的一小张表，条目淘汰时一起清掉。
 @MainActor
 enum NearbyDeviceOrigin {

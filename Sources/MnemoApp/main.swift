@@ -414,21 +414,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             switch self.model.barState {
             case .todoDraft:
                 guard let prompt = self.model.todoPrompt else { return [] }
-                switch prompt {
-                case .asking:
-                    guard actionFrames.count == 2 else { return [] }
-                    return [
-                        HitRegion(rect: actionFrames[0]) { [weak self] in
-                            self?.model.confirmTodoPrompt()
-                        },
-                        HitRegion(rect: actionFrames[1]) { [weak self] in
-                            self?.model.rejectTodoPrompt()
-                        },
-                    ]
-                case .created:
-                    guard let only = actionFrames.first else { return [] }
-                    return [HitRegion(rect: only) { [weak self] in self?.model.rejectTodoPrompt() }]
-                }
+                guard case .asking = prompt, actionFrames.count == 2 else { return [] }
+                return [
+                    HitRegion(rect: actionFrames[0]) { [weak self] in self?.model.confirmTodoPrompt() },
+                    HitRegion(rect: actionFrames[1]) { [weak self] in self?.model.rejectTodoPrompt() },
+                ]
             case .reminding:
                 guard actionFrames.count == 2 else { return [] }
                 return [
@@ -1489,6 +1479,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 let app = NSApplication.shared
+#if DEBUG
+if ProcessInfo.processInfo.environment["MNEMO_SMOKE_TODO"] == "1",
+   ProcessInfo.processInfo.environment["MNEMO_DATA_ROOT"] != nil {
+    Task { @MainActor in await TodoSmokeCheck.run() }
+    app.setActivationPolicy(.accessory)
+    app.run()
+    exit(EXIT_SUCCESS)
+}
+#endif
 guard let instanceGuard = SingleInstanceGuard() else { exit(EXIT_SUCCESS) }
 let delegate = AppDelegate(instanceGuard: instanceGuard)
 app.delegate = delegate

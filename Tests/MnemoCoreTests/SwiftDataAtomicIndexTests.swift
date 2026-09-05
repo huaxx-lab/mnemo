@@ -53,3 +53,18 @@ func swiftDataAtomicIndexReplacement() async throws {
     #expect(storedChunks.map(\.text) == chunks.map(\.text))
     #expect(storedChunks.first?.vector == [0.4, 0.6])
 }
+
+@Test("标题归属与小红书迁移代次持久化往返不丢失")
+func titleOriginPersistsAcrossStoreAndArchive() async throws {
+    let container = try SwiftDataItemStore.makeContainer(inMemory: true)
+    let store = SwiftDataItemStore(modelContainer: container)
+    let item = Item(title: "手写名称", kind: .link, holding: .inline("https://www.xiaohongshu.com/explore/abc"),
+                    titleOrigin: "user", linkExtractionVersion: 5)
+    try await store.insert(item)
+    let read = try #require(try await store.item(id: item.id))
+    #expect(read.titleOrigin == "user")
+    #expect(read.linkExtractionVersion == 5)
+    let archive = try JSONDecoder().decode(ArchivedItem.self, from: JSONEncoder().encode(ArchivedItem(item: read)))
+    #expect(archive.materialize(holding: read.holding).titleOrigin == "user")
+    #expect(!LinkRefreshPolicy.mayReplaceTitle(read))
+}

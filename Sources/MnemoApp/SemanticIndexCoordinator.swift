@@ -119,28 +119,38 @@ enum SemanticIndexCoordinator {
             }
         }
 
-        // 链接的配图也进 RAG。
-        //
-        // 小红书这类内容常常**根本不在文字里**：正文只有一句"见图"，信息全
-        // 写在配图上，而且经常不止一张。配图已被 LinkCoverStore 缓存到本地，
-        // 这里不再发网络请求。优先用全分辨率副本：卡片那张只有 240px，字一密
-        // OCR 就只剩噪声。
-        if item.kind == .link, !Task.isCancelled {
-            var imageURLs = LinkCoverStore.ocrSourceURLs(for: item.id)
-            if imageURLs.isEmpty {
-                let cover = LinkCoverStore.url(for: item.id)
-                if FileManager.default.fileExists(atPath: cover.path) { imageURLs = [cover] }
+        // 强制刷新时先取得 OCR 图源再索引，不能先读旧图、结束后才异步下载新图。
+        let isXiaohongshu = LinkRefreshPolicy.isNote(item.linkURL)
+        var refreshedImages = false
+        if isXiaohongshu,
+           forceRefreshLink || LinkCoverStore.ocrSourceURLs(for: item.id).isEmpty,
+           let url = item.linkURL {
+            let preview = await LinkCoverStore.refreshForIndex(url, itemID: item.id)
+            guard !Task.isCancelled else {
+                return IndexingRunResult(completed: false, dimensionChanged: false)
             }
-            for imageURL in imageURLs {
-                guard !Task.isCancelled else { break }
-                let imageChunks = await SemanticContentExtractor.linkCoverChunks(
-                    itemID: item.id,
-                    coverURL: imageURL,
-                    ordinalBase: chunks.count
-                )
-                chunks.append(contentsOf: imageChunks)
+            refreshedImages = preview.hasImages
+            fetchedPageTitle = fetchedPageTitle ?? preview.title
+        }
+        if item.kind == .link, !Task.isCancelled {
+            let imageURLs = LinkCoverStore.ocrSourceURLs(for: item.id)
+            // 不再对 240px 封面兜底 OCR：它可能只是平台 logo。
+            if imageURLs.isEmpty || (isXiaohongshu && forceRefreshLink && !refreshedImages) {
+                chunks.append(contentsOf: previousChunks.filter {
+                    $0.source == .imageOCR || $0.source == .imageCaption
+                })
+            } else {
+                for (index, imageURL) in imageURLs.enumerated() {
+                    guard !Task.isCancelled else { break }
+                    var imageChunks = await SemanticContentExtractor.linkCoverChunks(
+                        itemID: item.id, coverURL: imageURL, ordinalBase: chunks.count
+                    )
+                    for i in imageChunks.indices { imageChunks[i].pageNumber = index + 1 }
+                    chunks.append(contentsOf: imageChunks)
+                }
             }
         }
+        for index in chunks.indices { chunks[index].ordinal = index }
 
         // 用户自己写的那一句排在最前面：改过的标题、加上的标签、分组。
         //
@@ -255,21 +265,32 @@ enum SemanticIndexCoordinator {
         do {
             // `item` 可能在抓网页的几秒里被元数据任务更新过。重新读当前版本，
             // 只把本轮索引负责的字段合并进去，避免用旧快照覆盖新标题/标签。
-            var updated = (try? await library.item(id: item.id)) ?? item
+            let isNearby = await MainActor.run { NearbyDeviceOrigin.contains(item.id) }
+            guard !Task.isCancelled,
+                  var updated = try await library.item(id: item.id),
+                  updated.state == .active, !updated.isPrivate,
+                  updated.holding == item.holding,
+                  updated.origin != .clipboard || updated.isPinned
+                    || isNearby else {
+                return IndexingRunResult(completed: false, dimensionChanged: dimensionChanged)
+            }
             // 正文抓取和标题来自**同一个 HTTP 响应**，必须同一次落库。过去标题
             // 依赖另一条 LPMetadataProvider 任务：正文进 RAG 了，卡片却仍叫
             // “无法访问链接内容”。只有临时本地标题能被自动替换；用户手写标题
             // (`titledLocally == false`) 永远保留。
-            if (updated.titledLocally
-                    || LinkTextExtraction.isFailurePlaceholderTitle(updated.title)),
+            if LinkRefreshPolicy.mayReplaceTitle(updated),
                let title = fetchedPageTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
                !title.isEmpty, title != updated.title {
                 updated.title = String(title.prefix(80))
                 // 网页自己给出的标题已经不是“本地凑出来的临时名”。后续普通
                 // 元数据补抓不再反复覆盖它；用户手写标题同样一直受保护。
                 updated.titledLocally = false
+                updated.titleOrigin = "page"
             }
 
+            if isXiaohongshu, forceRefreshLink, refreshedImages {
+                updated.linkExtractionVersion = LinkRefreshPolicy.xiaohongshuVersion
+            }
             if let modelID,
                let aggregate = averageVector(chunks.compactMap(\.vector)) {
                 updated.vector = aggregate
