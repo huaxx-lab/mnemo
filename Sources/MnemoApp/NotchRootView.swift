@@ -33,6 +33,39 @@ enum NotchLayout {
     static var notchWidth: CGFloat = 180
     static var notchHeight: CGFloat = 32
     static var panelWidth: CGFloat = 640
+
+    /// 贴着物理刘海描边用的形状——只用在**轮廓描边**（识别中/成功那圈轻光），
+    /// 不用在任何铺底色的实心填充上。
+    ///
+    /// 之前顶部两角是 0（直角），是从"面板填充"那份形状直接照抄来的：那份
+    /// 0 是必要的——填充的顶边贴着屏幕物理上沿，圆了顶角会在两侧露出一小块
+    /// 三角形背景（工作台面板 600pt 宽，那块三角形里是真的桌面，不是系统的
+    /// 菜单栏底色，圆了确实会"漏"）。可轮廓描边只在刘海本体那么窄的取景框里
+    /// 画（`notchWidth` 左右，不是整块面板），这个宽度内怎么画都还在系统
+    /// 自己常年画成暗色的菜单栏范围内，不存在"漏出桌面"这回事——继续沿用
+    /// 那份 0 只是没必要地把两种不同东西的约束混在了一起。
+    ///
+    /// 真实物理刘海的顶角本身也不是直角：参考社区验证过的开源刘海适配项目
+    /// （DynamicNotchKit / boring.notch 的 NotchShape，默认参数
+    /// topCornerRadius=6、bottomCornerRadius=14），顶角在刘海和边框的过渡处
+    /// 有一圈很小的圆角，不是生生截断的直角。之前描边完全照搬 0，画出来的
+    /// 顶角比真实刘海更方，贴合度肉眼可辨——这正是"光边没有贴着刘海画"的
+    /// 由来。这里的圆角值取小一点（4pt）：`UnevenRoundedRectangle` 用的是
+    /// 圆弧角，不是那两个项目手写的二次贝塞尔角，同一个数字在圆弧下视觉上
+    /// 略显更"满"，取小一点再配合下面沿用已久的 11pt 底角，观感上和参考
+    /// 项目的 6:14 比例基本一致。
+    static let notchHuggingTopRadius: CGFloat = 4
+    static let notchHuggingBottomRadius: CGFloat = 11
+
+    static var notchHuggingShape: UnevenRoundedRectangle {
+        UnevenRoundedRectangle(
+            topLeadingRadius: notchHuggingTopRadius,
+            bottomLeadingRadius: notchHuggingBottomRadius,
+            bottomTrailingRadius: notchHuggingBottomRadius,
+            topTrailingRadius: notchHuggingTopRadius,
+            style: .circular
+        )
+    }
     static let headerHeight: CGFloat = 48
     /// 效率模式的表盘 + 控制行 + 统计条决定了这个下限；收纳模式用两行卡片
     /// 把同一块空间填满，而不是让它空着。
@@ -300,16 +333,11 @@ private struct WorkspaceShell: View {
                 }
                 // 工作台展开时只亮顶部刘海轮廓，不给整张面板描边。
                 if model.edgeStatusEffectsEnabled, model.isRecognizingTodos {
-                    TodoRecognitionEdge(
-                        shape: UnevenRoundedRectangle(bottomLeadingRadius: 11, bottomTrailingRadius: 11)
-                    )
+                    TodoRecognitionEdge(shape: NotchLayout.notchHuggingShape)
                     .frame(width: NotchLayout.notchWidth + 24, height: NotchLayout.notchHeight)
                     .frame(maxHeight: .infinity, alignment: .top)
                 } else if model.edgeStatusEffectsEnabled, let signal = model.edgeStatusSignal {
-                    EdgeStatusGlow(
-                        shape: UnevenRoundedRectangle(bottomLeadingRadius: 11, bottomTrailingRadius: 11),
-                        signal: signal
-                    )
+                    EdgeStatusGlow(shape: NotchLayout.notchHuggingShape, signal: signal)
                     .frame(width: NotchLayout.notchWidth + 24, height: NotchLayout.notchHeight)
                     .frame(maxHeight: .infinity, alignment: .top)
                     .id(signal)
@@ -625,11 +653,15 @@ private struct CollapsedBar: View {
             // 比这圈光的取景框还窄，多出来的部分会被窗口边界整段裁掉：
             // 剩下的不是一整圈，而是贴着顶边的一小段线，两侧竖线全没了。
             // 这正是"刘海外部多出一圈、看着像一条线"的真实成因。
+            // 这里不能沿用上面那个 `shape`：那份顶角是 0，是给两翼展开时的
+            // 大片黑底填充用的（宽度可以到 notchWidth + 112pt，两角圆了会在
+            // 两翼外侧露出真桌面）。描边只在严格 notchWidth 这个取景框里画，
+            // 用贴合刘海本体的那份圆角，两者互不相关，不能共用一个值。
             if model.edgeStatusEffectsEnabled, model.isRecognizingTodos {
-                TodoRecognitionEdge(shape: shape)
+                TodoRecognitionEdge(shape: NotchLayout.notchHuggingShape)
                     .frame(width: NotchLayout.notchWidth, height: NotchLayout.notchHeight)
             } else if model.edgeStatusEffectsEnabled, let signal = model.edgeStatusSignal {
-                EdgeStatusGlow(shape: shape, signal: signal)
+                EdgeStatusGlow(shape: NotchLayout.notchHuggingShape, signal: signal)
                     .frame(width: NotchLayout.notchWidth, height: NotchLayout.notchHeight)
                     .id(signal)
             }

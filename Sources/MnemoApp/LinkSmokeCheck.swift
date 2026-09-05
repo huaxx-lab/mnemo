@@ -17,6 +17,12 @@ enum LinkSmokeCheck {
               rootPath.hasPrefix("/tmp/mnemo-ui-smoke-") else { exit(2) }
         let root = URL(filePath: rootPath)
         UserDefaults.standard.set(false, forKey: "Pinland.launchAtLogin")
+        // 生产环境的 `applicationDidFinishLaunching` 会在这里恢复登录态；
+        // 这个隔离入口是单独走的（main.swift 顶层直接分流到这里，不经过
+        // AppDelegate），漏了这一步的话，这里跑出来的永远是"未登录"那条路，
+        // 和用户实际在跑的应用不是同一个场景，排查不出登录态到底有没有生效。
+        await XiaohongshuSession.restoreAtLaunch()
+        print("SMOKE: xiaohongshu session restored — signedIn=\(XiaohongshuSession.isSignedIn) cookies=\(XiaohongshuSession.cookieCount)")
         let model = AppModel()
         let settings = ProviderSettingsModel()
         model.contentIndexAction = { item, forceRefreshLink in
