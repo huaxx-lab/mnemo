@@ -1487,6 +1487,13 @@ if ProcessInfo.processInfo.environment["MNEMO_SMOKE_TODO"] == "1",
     app.run()
     exit(EXIT_SUCCESS)
 }
+if ProcessInfo.processInfo.environment["MNEMO_SMOKE_LINK"] == "1",
+   ProcessInfo.processInfo.environment["MNEMO_DATA_ROOT"] != nil {
+    Task { @MainActor in await LinkSmokeCheck.run() }
+    app.setActivationPolicy(.accessory)
+    app.run()
+    exit(EXIT_SUCCESS)
+}
 #endif
 guard let instanceGuard = SingleInstanceGuard() else { exit(EXIT_SUCCESS) }
 let delegate = AppDelegate(instanceGuard: instanceGuard)
