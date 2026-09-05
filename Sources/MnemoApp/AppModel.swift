@@ -5427,6 +5427,17 @@ final class AppModel {
     /// 每次升级最多补 32 条；当前库规模能一次覆盖。网络和索引仍由全局单通道
     /// 串行执行，不会因为候选多就并发轰站点。
     private static let linkReparseBatch = 32
+    /// 小红书版本迁移每次开机最多补几条，明显小于上面那个通用上限。
+    ///
+    /// 通用补抓的候选是"各自在不同时间点失败过一次"的旧链接，天然分散；
+    /// 版本迁移不一样——升级那一刻库里所有旧笔记会**同时**变成候选，一次性
+    /// 派发 32 条即便由 LinkFetchScheduler 串行、每条间隔 1.5 秒执行，也是
+    /// 几十秒内连续访问同一个站点几十次，比正常使用节奏（用户一条一条粘贴）
+    /// 密集得多，容易被识别为异常流量而临时限流——用户实报"更新后小红书
+    /// 重新解析全失败"，现象是所有笔记同时失败而不是某一条，和 IP 被限流
+    /// 而不是某条内容真的解析不了完全吻合。改成小额度、分摊到后续多次
+    /// 开机慢慢补完，单次开机造成的访问密度低一个数量级。
+    private static let linkMigrationBatch = 5
 
     /// 重新解析一条链接并原子替换 RAG。
     ///
@@ -5527,7 +5538,7 @@ final class AppModel {
         let migrating = links.filter {
             LinkRefreshPolicy.needsMigration($0) && migrationAttempts[$0.id.uuidString, default: 0] < 3
                 && !forcedLinkRefreshIDs.contains($0.id)
-        }.prefix(Self.linkReparseBatch)
+        }.prefix(Self.linkMigrationBatch)
         for link in migrating {
             migrationAttempts[link.id.uuidString, default: 0] += 1
             queueForcedLinkRefresh(link.id)
