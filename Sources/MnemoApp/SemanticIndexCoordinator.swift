@@ -8,6 +8,28 @@ struct IndexingRunResult: Sendable {
     var autoRetryAfter: TimeInterval?
 }
 
+/// 一条链接配图的 OCR 是否还是"当前那一次"。
+///
+/// OCR 现在跑在后台、不挡这次索引算不算完成（见下面 `index` 里的说明）。
+/// 问题是它跑得慢，跑的这几秒到几十秒里，同一条链接完全可能又被重新解析
+/// 一次——旧的那次 OCR 跑完之后绝不能拿着过时的结果去覆盖新的一轮已经
+/// 落好的内容。用一个按条目 id 递增的代次挡住："我出发时是第几代，落盘前
+/// 还是不是当前代"，不是就悄悄放弃，交给取代它的那一轮自己写。
+private actor ImageOCRGenerationTracker {
+    static let shared = ImageOCRGenerationTracker()
+    private var generations: [UUID: Int] = [:]
+
+    func next(for itemID: UUID) -> Int {
+        let value = (generations[itemID] ?? 0) + 1
+        generations[itemID] = value
+        return value
+    }
+
+    func isCurrent(_ generation: Int, for itemID: UUID) -> Bool {
+        generations[itemID] == generation
+    }
+}
+
 struct SemanticSearchRun: Sendable {
     var hits: [SemanticSearchHit]
     var understoodQuery: StructuredQuery
@@ -132,22 +154,26 @@ enum SemanticIndexCoordinator {
             refreshedImages = preview.hasImages
             fetchedPageTitle = fetchedPageTitle ?? preview.title
         }
+        // OCR 是这条链路里最贵的一步：一张图在本机跑 Vision 精确识别 + 分类，
+        // 实测能到二十几秒，而抓正文、抓标题都是一两秒的事。把它放在"这次
+        // 索引算不算完成"前面，等于让用户为了一张配图等上原本不必要的几十
+        // 秒——很容易被当成"卡死了"，等不及点第二次反而弹出"重新解析失败"。
+        //
+        // 现在这一步不挡：先用得到的旧配图分块（没有就先空着）把文字、标题
+        // 正常落库，OCR 在后台单独跑完再补一次更小的落盘。用户看到的是"内容
+        // 很快就好了，配图里的文字晚一点点补上"，而不是"半天没反应"。
+        var pendingOCRImageURLs: [URL] = []
         if item.kind == .link, !Task.isCancelled {
             let imageURLs = LinkCoverStore.ocrSourceURLs(for: item.id)
+            let previousImageChunks = previousChunks.filter {
+                $0.source == .imageOCR || $0.source == .imageCaption
+            }
             // 不再对 240px 封面兜底 OCR：它可能只是平台 logo。
             if imageURLs.isEmpty || (isXiaohongshu && forceRefreshLink && !refreshedImages) {
-                chunks.append(contentsOf: previousChunks.filter {
-                    $0.source == .imageOCR || $0.source == .imageCaption
-                })
+                chunks.append(contentsOf: previousImageChunks)
             } else {
-                for (index, imageURL) in imageURLs.enumerated() {
-                    guard !Task.isCancelled else { break }
-                    var imageChunks = await SemanticContentExtractor.linkCoverChunks(
-                        itemID: item.id, coverURL: imageURL, ordinalBase: chunks.count
-                    )
-                    for i in imageChunks.indices { imageChunks[i].pageNumber = index + 1 }
-                    chunks.append(contentsOf: imageChunks)
-                }
+                chunks.append(contentsOf: previousImageChunks)
+                pendingOCRImageURLs = imageURLs
             }
         }
         for index in chunks.indices { chunks[index].ordinal = index }
@@ -319,11 +345,118 @@ enum SemanticIndexCoordinator {
                 waitingForEmbedding: false
             )
         }
+        // 文字、标题这一版已经落盘；配图的 OCR 单独在后台跑完再补一次
+        // 小得多的落盘，不拖这次"完成"的判定。
+        if !pendingOCRImageURLs.isEmpty {
+            let generation = await ImageOCRGenerationTracker.shared.next(for: item.id)
+            let holding = item.holding
+            Task.detached(priority: .utility) {
+                await Self.completeImageOCR(
+                    itemID: item.id,
+                    holding: holding,
+                    imageURLs: pendingOCRImageURLs,
+                    library: library,
+                    settings: settings,
+                    generation: generation
+                )
+            }
+        }
         return IndexingRunResult(
             completed: true,
             dimensionChanged: dimensionChanged,
             waitingForEmbedding: false
         )
+    }
+
+    /// 配图 OCR 的后台补丁：跑完就整份重读当前分块，把旧的配图分块换成
+    /// 新的，其余（正文、用户标注）原样不动，只给真正新的分块补 embedding，
+    /// 一次性原子落盘——和主流程同一条"分块与 Item 同一事务"的规矩。
+    ///
+    /// 落盘前查一次代次：跑这几秒到二十几秒的期间，同一条链接完全可能已经
+    /// 被更新的一轮重新解析取代，这时候悄悄放弃，绝不能拿过时结果反过来
+    /// 盖掉更新的内容。
+    private static func completeImageOCR(
+        itemID: UUID,
+        holding: Holding,
+        imageURLs: [URL],
+        library: Library,
+        settings: ProviderSettingsModel,
+        generation: Int
+    ) async {
+        var ocrChunks: [ContentChunk] = []
+        for (index, imageURL) in imageURLs.enumerated() {
+            guard !Task.isCancelled else { return }
+            var imageChunks = await SemanticContentExtractor.linkCoverChunks(
+                itemID: itemID, coverURL: imageURL, ordinalBase: 0
+            )
+            for i in imageChunks.indices { imageChunks[i].pageNumber = index + 1 }
+            ocrChunks.append(contentsOf: imageChunks)
+        }
+        guard !Task.isCancelled,
+              await ImageOCRGenerationTracker.shared.isCurrent(generation, for: itemID),
+              let current = try? await library.item(id: itemID),
+              current.state == .active, !current.isPrivate, current.holding == holding
+        else { return }
+
+        var chunks = (try? await library.chunks(for: itemID)) ?? []
+        chunks.removeAll { $0.source == .imageOCR || $0.source == .imageCaption }
+        chunks.append(contentsOf: ocrChunks)
+        for index in chunks.indices { chunks[index].ordinal = index }
+
+        let currentEmbeddingModelID = await settings.embeddingModelID
+        var modelID: String?
+        var shouldRetry = false
+        let indexedAt = Date.now
+        let batchSize = 16
+        for start in stride(from: 0, to: chunks.count, by: batchSize) {
+            guard !Task.isCancelled else { return }
+            let end = min(chunks.count, start + batchSize)
+            let pending = (start..<end).filter {
+                chunks[$0].vector == nil || chunks[$0].embeddingModelID != currentEmbeddingModelID
+            }
+            guard !pending.isEmpty else {
+                modelID = modelID ?? chunks[start..<end].compactMap(\.embeddingModelID).first
+                continue
+            }
+            let attempts = await settings.embed(
+                pending.map { chunks[$0].text },
+                allowSensitiveContent: current.allowsSensitiveAI
+            )
+            for (offset, attempt) in attempts.enumerated() {
+                guard pending.indices.contains(offset) else { continue }
+                let index = pending[offset]
+                guard chunks.indices.contains(index) else { continue }
+                switch attempt {
+                case .success(let embedding):
+                    chunks[index].vector = embedding.vector
+                    chunks[index].embeddingModelID = embedding.modelID
+                    chunks[index].indexedAt = indexedAt
+                    modelID = embedding.modelID
+                case .privacyBlocked, .notConfigured:
+                    break
+                case .configurationFailure, .retryableFailure:
+                    // 后台补丁不接自动重试那一整套：这本来就是"晚一点点补上"，
+                    // 下次正常重建索引会按 contentHash 把这批 OCR 文本重新捡回去，
+                    // 不需要在这里再单独维护一条重试链路。
+                    shouldRetry = true
+                }
+            }
+        }
+        guard !shouldRetry else { return }
+
+        guard !Task.isCancelled,
+              await ImageOCRGenerationTracker.shared.isCurrent(generation, for: itemID),
+              var updated = try? await library.item(id: itemID),
+              updated.state == .active, !updated.isPrivate, updated.holding == holding
+        else { return }
+        if let modelID, let aggregate = averageVector(chunks.compactMap(\.vector)) {
+            updated.vector = aggregate
+            updated.contentHash = chunks.map(\.contentHash).joined(separator: ":")
+            updated.embeddingModelID = modelID
+            updated.indexedAt = indexedAt
+            updated.aiPrivacyBlocked = false
+        }
+        try? await library.replaceChunks(for: itemID, with: chunks, updating: updated)
     }
 
     static func search(

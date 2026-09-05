@@ -29,8 +29,8 @@ enum LinkSmokeCheck {
             return result
         }
 
-        func wait(_ label: String, _ condition: () async -> Bool) async throws {
-            let deadline = Date.now.addingTimeInterval(30)
+        func wait(_ label: String, timeout: TimeInterval = 30, _ condition: () async -> Bool) async throws {
+            let deadline = Date.now.addingTimeInterval(timeout)
             var lastPrint = Date.distantPast
             while await !condition() {
                 guard Date.now < deadline else {
@@ -79,6 +79,17 @@ enum LinkSmokeCheck {
             }
             // 给收尾几帧时间落盘。
             try await Task.sleep(for: .milliseconds(300))
+            let fast = try await model.library.chunks(for: id)
+            print("SMOKE: fast-path settled — chunkCount=\(fast.count) sources=\(fast.map(\.source))")
+
+            // OCR 在后台跑，不挡上面那次"完成"——单独等它把配图分块补上，
+            // 确认异步补丁真的落地了，而不是快是快了、OCR 结果却悄悄丢了。
+            print("SMOKE: waiting for background OCR patch to land")
+            try await wait("background OCR", timeout: 60) {
+                let chunks = (try? await model.library.chunks(for: id)) ?? []
+                return chunks.contains { $0.source == .imageOCR || $0.source == .imageCaption }
+            }
+
             let final = try await model.library.item(id: id)
             let chunks = (try? await model.library.chunks(for: id)) ?? []
             let result = """
@@ -86,7 +97,9 @@ enum LinkSmokeCheck {
             title=\(final?.title ?? "nil") \
             titleOrigin=\(final?.titleOrigin ?? "nil") \
             linkExtractionVersion=\(final?.linkExtractionVersion.map(String.init) ?? "nil") \
-            chunkCount=\(chunks.count) \
+            fastPathChunkCount=\(fast.count) \
+            finalChunkCount=\(chunks.count) \
+            finalSources=\(chunks.map(\.source)) \
             feedback=\(model.feedbackMessage ?? "nil") \
             lastError=\(model.lastError ?? "nil")
             """
