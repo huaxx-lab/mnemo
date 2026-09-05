@@ -12,7 +12,7 @@
   <img src="https://img.shields.io/badge/系统-macOS%2026+-black" alt="macOS">
   <img src="https://img.shields.io/badge/语言-Swift-orange" alt="Swift">
   <img src="https://img.shields.io/badge/许可-MIT-green" alt="License">
-  <img src="https://img.shields.io/badge/下载-v3.4.5-blue" alt="Version">
+  <img src="https://img.shields.io/badge/下载-v3.4.6-blue" alt="Version">
 </p>
 
 <p align="center">
