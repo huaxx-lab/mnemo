@@ -11,6 +11,7 @@ private enum SettingsPage: String, CaseIterable, Identifiable {
     case routing = "AI 功能"
     case embedding = "Embedding"
     case todos = "待办与提醒"
+    case accounts = "站点登录"
     case shortcuts = "快捷键"
     case storage = "存储与回收站"
     case appearance = "外观与行为"
@@ -22,6 +23,7 @@ private enum SettingsPage: String, CaseIterable, Identifiable {
         case .routing: "point.3.connected.trianglepath.dotted"
         case .embedding: "square.stack.3d.down.forward"
         case .todos: "checklist"
+        case .accounts: "person.crop.circle.badge.checkmark"
         case .shortcuts: "command"
         case .storage: "internaldrive"
         case .appearance: "paintbrush"
@@ -55,6 +57,8 @@ struct ProviderSettingsView: View {
                         EmbeddingSettingsPage(settings: settings)
                     case .todos:
                         TodoSettingsPage(appModel: appModel, settings: settings)
+                    case .accounts:
+                        SiteAccountSettingsPage()
                     case .shortcuts:
                         ShortcutSettingsPage(shortcuts: shortcuts)
                     case .storage:
@@ -114,6 +118,10 @@ struct ProviderSettingsView: View {
             shortcuts.saveSettings()
         case .storage:
             appModel.saveSettings()
+        case .accounts:
+            // 登录/退出登录一发生就立刻生效落盘，不走"编辑后点保存"这条路——
+            // 这里点"保存当前页"只是让状态栏显示"已保存"，没有别的东西要写。
+            break
         }
         savedPage = page
         savedAt = .now
@@ -1322,6 +1330,102 @@ private struct ShortcutSettingsPage: View {
             .foregroundStyle(.secondary)
             .help("恢复默认")
         }
+    }
+}
+
+/// 站点登录：用用户自己的账号访问需要登录态才稳定的站点。
+///
+/// 目前只接小红书——匿名抓取被限流/风控时会拿到整站通用页而不是笔记本身
+/// （见 `XiaohongshuSession` 顶部的说明）。登录后走的是用户自己账号能看到
+/// 的内容，不依赖分享链接里那个会过期的 `xsec_token`。
+private struct SiteAccountSettingsPage: View {
+    @State private var showsLoginSheet = false
+    @State private var isSignedIn = false
+    @State private var signedInAt: Date?
+    @State private var cookieCount = 0
+    @State private var isSigningOut = false
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("站点登录").font(.system(size: 22, weight: .bold))
+                    Text("登录后抓取更稳定，不容易被当成匿名访问限流。登录信息只存在本机 ~/.mnemo 下，不上传。")
+                        .font(.system(size: 12)).foregroundStyle(.secondary)
+                }
+
+                SettingsCard(
+                    title: "小红书",
+                    subtitle: "登录页就是小红书官网，扫码、手机号验证码等官方支持的方式都能用。"
+                ) {
+                    HStack(spacing: 12) {
+                        Image(systemName: isSignedIn ? "checkmark.seal.fill" : "person.crop.circle")
+                            .font(.system(size: 20))
+                            .foregroundStyle(isSignedIn ? Color.green : Color.secondary)
+                            .frame(width: 32)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(isSignedIn ? "已登录" : "未登录")
+                                .font(.system(size: 12, weight: .medium))
+                            if isSignedIn {
+                                Text(statusDetail)
+                                    .font(.system(size: 10.5))
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                Text("未登录时仍可抓取，只是更容易被限流。")
+                                    .font(.system(size: 10.5))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        Spacer()
+                        if isSignedIn {
+                            Button(role: .destructive) {
+                                Task {
+                                    isSigningOut = true
+                                    await XiaohongshuSession.signOut()
+                                    await refreshStatus()
+                                    isSigningOut = false
+                                }
+                            } label: {
+                                if isSigningOut {
+                                    ProgressView().controlSize(.small)
+                                } else {
+                                    Text("退出登录")
+                                }
+                            }
+                            .disabled(isSigningOut)
+                        }
+                        Button(isSignedIn ? "重新登录" : "登录小红书") {
+                            showsLoginSheet = true
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                }
+            }
+            .padding(24)
+            .frame(maxWidth: 760, alignment: .leading)
+        }
+        .task { await refreshStatus() }
+        .sheet(isPresented: $showsLoginSheet) {
+            XiaohongshuLoginSheet(isPresented: $showsLoginSheet)
+        }
+        .onChange(of: showsLoginSheet) { _, presented in
+            guard !presented else { return }
+            Task { await refreshStatus() }
+        }
+    }
+
+    private var statusDetail: String {
+        guard let signedInAt else { return "共 \(cookieCount) 项登录凭据" }
+        return "\(signedInAt.formatted(date: .abbreviated, time: .shortened)) · 共 \(cookieCount) 项登录凭据"
+    }
+
+    @MainActor
+    private func refreshStatus() async {
+        // 应用刚启动时登录态是异步从磁盘恢复的（`XiaohongshuSession.restoreAtLaunch`），
+        // 这里等它一小会儿再读，避免设置页刚打开时闪一下"未登录"又跳成"已登录"。
+        isSignedIn = XiaohongshuSession.isSignedIn
+        signedInAt = XiaohongshuSession.signedInAt
+        cookieCount = XiaohongshuSession.cookieCount
     }
 }
 

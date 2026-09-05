@@ -100,6 +100,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        Task { await XiaohongshuSession.restoreAtLaunch() }
         model.openSettingsAction = { [weak self] in self?.showSettings() }
         model.groupNamingAction = { [weak providerSettings] summaries in
             await providerSettings?.nameGroup(summaries: summaries)
