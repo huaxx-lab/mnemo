@@ -5278,6 +5278,16 @@ final class AppModel {
                 guard let action = self.contentIndexAction else { return }
                 let forceRefreshLink = self.forcedLinkRefreshIDs.contains(id)
                 let result = await action(item, forceRefreshLink)
+                // action(...) 内部一路都在 await（网络请求、Embedding）。取消可能发生
+                // 在这些 await 期间——最常见的就是用户又点了一次"重新解析"：
+                // reparseLink 会先取消当前整条队列任务再重排。循环顶部的
+                // `!Task.isCancelled` 只在**每次迭代开始时**查一次，这一条已经在跑
+                // 到一半时被取消，`result.completed` 自然是 false，但原因是"被更新的
+                // 一次操作取代"，不是抓取或内容真的坏了。不补这一步的话，这里会照
+                // 常走进下面的失败分支，把"撤销"误报成"重新解析失败"——用户看到的
+                // 是自己第二次点击造成的假失败，实际那次请求本身很可能是好的。
+                // 真正的结果交给取代它的那次运行自己汇报，这里直接放弃、不留痕迹。
+                guard !Task.isCancelled else { break }
                 let isManualRefresh = self.manualLinkRefreshIDs.contains(id)
                 if !result.completed && !result.waitingForEmbedding {
                     // 边缘警示灯是给**用户自己发起**的动作准备的（见拖入失败那处
