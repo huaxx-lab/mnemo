@@ -6547,8 +6547,14 @@ private struct StatusToast: View {
             //
             // 只有按钮该收鼠标：图标、文字和这层胶囊底一律让点击穿过去。
             .background {
+                // 这块胶囊浮在卡片轨道上方，底下随时可能是一张浅色缩略图——
+                // 8% 白的 contentElevated 是给"本来就在纯黑面板里"的控件用的
+                // 深浅层次，单独浮在任意内容上时不够盖住底下的亮色，文字看
+                // 起来就是"糊在图上"。这里先铺一层接近不透明的面板同色，
+                // 再叠原来那层高光，保证不管底下是什么都稳定可读。
                 Capsule()
-                    .fill(Style.contentElevated)
+                    .fill(Style.shell)
+                    .overlay { Capsule().fill(Style.contentElevated) }
                     .overlay { Capsule().stroke(Style.hairline, lineWidth: 1) }
                     .allowsHitTesting(false)
             }

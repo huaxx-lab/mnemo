@@ -14,15 +14,23 @@ public enum LinkRefreshPolicy {
             && (item.linkExtractionVersion ?? 0) < xiaohongshuVersion
     }
 
+    /// 小红书在笔记不可用（token 过期、临时抓取失败等）时回退给的通用文案，
+    /// 而不是这条笔记自己的标题。逐字维护一张名单在实测里已经不够：同一类
+    /// 回退文案换个措辞就漏过去（"生活分享精选推荐"就不在旧名单里，
+    /// 用户手动重新解析也救不回来）。改成认这几个反复出现的泛化片段——
+    /// 真实笔记标题几乎不会同时踩中"分享/推荐/热门/精彩"这类纯营销词而不带
+    /// 任何具体内容，即便偶尔撞上，重新抓到的仍是同一个值，不会越改越错。
+    private static let genericFallbackFragments = [
+        "精彩内容", "生活分享", "热门内容", "分享内容", "搜索结果", "精选推荐",
+    ]
+
     public static func mayReplaceTitle(_ item: Item) -> Bool {
         if item.titleOrigin == "user" { return false }
         if item.titledLocally || item.titleOrigin == "ai" || item.titleOrigin == "page" { return true }
-        // 旧库把 AI 与手写标题混在同一个 Bool 里。只迁移已知泛化占位名，
-        // 不按“小红书”关键字覆盖任何其他旧标题。
-        return LinkTextExtraction.isFailurePlaceholderTitle(item.title)
-            || (isNote(item.linkURL) && [
-                "小红书精彩内容分享", "小红书生活分享笔记", "小红书热门内容分享",
-                "小红书分享内容", "小红书搜索结果",
-            ].contains(item.title))
+        // 旧库把 AI 与手写标题混在同一个 Bool 里，遇到这种历史条目只敢在
+        // "看着就是泛化回退文案"时才覆盖，不按其他任何理由动旧标题。
+        if LinkTextExtraction.isFailurePlaceholderTitle(item.title) { return true }
+        guard isNote(item.linkURL) else { return false }
+        return genericFallbackFragments.contains { item.title.contains($0) }
     }
 }

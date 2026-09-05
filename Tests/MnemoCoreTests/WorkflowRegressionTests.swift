@@ -104,6 +104,20 @@ func xhsMigrationProtectsUserTitles() {
     #expect(!LinkRefreshPolicy.needsMigration(item))
 }
 
+@Test("回退文案换措辞也拦得住：不是逐字对旧名单，而是认泛化片段")
+func xhsGenericFallbackTitleIsAlwaysReplaceable() {
+    // 用户实报：这条从未出现在旧的逐字名单里，手动"重新解析"也救不回来，
+    // 因为旧库唯一的信号 titledLocally 一旦被任何页面标题置为 false 就
+    // 再也翻不回来了。
+    let item = Item(title: "生活分享精选推荐", kind: .link,
+                     holding: .inline("https://www.xiaohongshu.com/explore/6a94ee06000000000a009dd1"))
+    #expect(LinkRefreshPolicy.mayReplaceTitle(item))
+    // 真实笔记标题不该被误伤：同样含常见词但明显是具体内容的标题必须保留。
+    let real = Item(title: "8.28 科大讯飞agent harness一面", kind: .link,
+                     holding: .inline("https://www.xiaohongshu.com/explore/6a94ee06000000000a009dd1"))
+    #expect(!LinkRefreshPolicy.mayReplaceTitle(real))
+}
+
 @Test("Mac 临时截图与文字均禁止处理，Pin 与手机来源可处理")
 func strictTemporaryWorkPolicy() {
     for kind in [ItemKind.image, .text, .link] {
