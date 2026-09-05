@@ -138,11 +138,7 @@ enum LinkCoverStore {
         for target: URL
     ) async -> (title: String?, images: [NSImage], pageParsed: Bool) {
         var request = URLRequest(url: target, timeoutInterval: 10)
-        request.setValue(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X) Mnemo/1.0 (+link preview)",
-            forHTTPHeaderField: "User-Agent"
-        )
-        request.setValue("zh-CN,zh;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")
+        BrowserRequestHeaders.apply(.document, to: &request)
         guard let (data, response) = await loadData(request),
               (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) == true,
               let html = String(data: data, encoding: .utf8)
@@ -156,7 +152,7 @@ enum LinkCoverStore {
         // OCR 图源全部丢掉，更不能把正文/标题“解析成功”降级成整页失败。
         for imageURL in note.imageURLs {
             var imageRequest = URLRequest(url: imageURL, timeoutInterval: 10)
-            imageRequest.setValue(target.absoluteString, forHTTPHeaderField: "Referer")
+            BrowserRequestHeaders.apply(.image, to: &imageRequest, referer: target.absoluteString)
             guard let (imageData, imageResponse) = await loadData(imageRequest),
                   (imageResponse as? HTTPURLResponse)
                     .map({ (200..<300).contains($0.statusCode) }) == true,
@@ -238,11 +234,7 @@ enum LinkCoverStore {
     /// 写在同一份 HTML 的 meta 里。
     private static func openGraphImage(for target: URL) async -> NSImage? {
         var request = URLRequest(url: target, timeoutInterval: 10)
-        request.setValue(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X) Mnemo/1.0 (+link preview)",
-            forHTTPHeaderField: "User-Agent"
-        )
-        request.setValue("zh-CN,zh;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")
+        BrowserRequestHeaders.apply(.document, to: &request)
         guard let (data, response) = await loadData(request),
               (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) == true,
               let html = String(data: data, encoding: .utf8)
@@ -252,7 +244,7 @@ enum LinkCoverStore {
         else { return nil }
 
         var imageRequest = URLRequest(url: imageURL, timeoutInterval: 10)
-        imageRequest.setValue(target.absoluteString, forHTTPHeaderField: "Referer")
+        BrowserRequestHeaders.apply(.image, to: &imageRequest, referer: target.absoluteString)
         guard let (imageData, imageResponse) = await loadData(imageRequest),
               (imageResponse as? HTTPURLResponse)
                 .map({ (200..<300).contains($0.statusCode) }) == true,
@@ -287,6 +279,7 @@ enum LinkCoverStore {
         for candidate in candidates {
             var request = URLRequest(url: candidate)
             request.timeoutInterval = 5
+            BrowserRequestHeaders.apply(.image, to: &request)
             guard let (data, response) = await loadData(request),
                   (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) == true,
                   let image = NSImage(data: data), image.size.width > 0 else { continue }

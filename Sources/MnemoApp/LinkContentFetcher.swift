@@ -232,13 +232,9 @@ enum LinkContentFetcher {
 
     private static func standardRequest(for url: URL) -> URLRequest {
         var request = URLRequest(url: url, timeoutInterval: timeout)
-        // 试过伪装成真实 Safari UA，知乎没变化、B 站反而触发更严风控；
-        // 用诚实的应用标识，真正需要 JS 的页面交给 WebKit。
-        request.setValue(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X) Mnemo/1.0 (+link preview)",
-            forHTTPHeaderField: "User-Agent"
-        )
-        request.setValue("zh-CN,zh;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")
+        // 统一请求头画像见 `BrowserRequestHeaders`；之前这里用的是自报家门的
+        // `Mnemo/1.0 (+link preview)`，对有风控的站点是最简单的机器人特征。
+        BrowserRequestHeaders.apply(.document, to: &request)
         return request
     }
 
