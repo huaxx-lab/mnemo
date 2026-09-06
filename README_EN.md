@@ -12,7 +12,7 @@
   <img src="https://img.shields.io/badge/macOS-26+-black" alt="macOS">
   <img src="https://img.shields.io/badge/Swift-orange" alt="Swift">
   <img src="https://img.shields.io/badge/License-MIT-green" alt="License">
-  <img src="https://img.shields.io/badge/Download-v3.4.6-blue" alt="Version">
+  <img src="https://img.shields.io/badge/Download-v3.4.7-blue" alt="Version">
 </p>
 
 <p align="center">
