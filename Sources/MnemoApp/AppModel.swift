@@ -1546,6 +1546,20 @@ final class AppModel {
               cardGroup(of: itemID) == nil,
               let item = items.first(where: { $0.id == itemID }),
               shouldProcessContent(item) else { return }
+        // 还在临时轨道上的东西不归组。
+        //
+        // 归组和理解内容是两件事：OCR、待办、RAG 都只是"看懂它"，用户什么
+        // 都没察觉；归组却会当场把卡片折进一摞里——那是在改用户看到的东西。
+        // 手机同步过来的内容为了能立刻可检索，走的是"到达即处理"这条路，
+        // 于是归组也跟着在用户**还没看见这张卡**的时候就发生了：东西确实收到
+        // 了，却直接进了某个折叠组，界面上什么新卡都没多出来，看起来就是
+        // "手机复制的东西不进来了"。Mac 本机复制的没这个问题，纯粹是因为它
+        // 压根等到固定之后才处理。
+        //
+        // 所以判据不是"来自哪台设备"，而是"用户有没有表示要留下它"——和
+        // `enqueueTodoScanIfNeeded` 那条线用的是同一个标准。临时卡先老老实实
+        // 待在轨道上让用户看见；固定之后才谈得上归到哪个组里去。
+        guard !(item.origin == .clipboard && !item.isPinned) else { return }
         let generation = cardGroupGeneration
         let groups = computedCardGroups
         guard !groups.isEmpty else { return }
