@@ -137,8 +137,10 @@ public enum DetailPresentationPolicy {
 
 /// 刘海用什么手势展开。
 ///
-/// 默认只认点击：悬停展开对"路过"和"想展开"分不清楚，而刘海正下方恰好是
+/// 默认只认点击：悬停展开对"路过"和"想展开"分不清楚，而刘海两侧恰好是
 /// 菜单栏——那是指针每天要经过很多次的地方。想要免点击的人可以自己打开。
+///
+/// 两种方式下，指针进入刘海都会有一圈很轻的呼吸，那只是"这里可以点"的提示。
 public enum NotchExpandTrigger: String, CaseIterable, Sendable, Codable {
     case click
     case hover
@@ -155,7 +157,7 @@ public enum NotchExpandTrigger: String, CaseIterable, Sendable, Codable {
 
     public var explanation: String {
         switch self {
-        case .click: "点一下刘海下沿才展开。默认，不会被路过的指针误触。"
+        case .click: "指针移到刘海上会轻轻呼吸，点一下展开。默认，不会被路过的指针误触。"
         case .hover: "指针停在刘海上约 0.4 秒就展开，不用点。"
         }
     }

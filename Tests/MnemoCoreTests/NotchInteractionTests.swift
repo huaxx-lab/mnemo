@@ -222,7 +222,7 @@ func anchorActionRegionsNeverOverlap() {
     #expect(Set(metrics.suggestionRowFrames.map(\.minY)).count == 2, "两行不能叠在一起")
 }
 
-@Test("剪贴板推荐的每一行都在物理刘海与展开唇下方，不会被第一排遮住")
+@Test("剪贴板推荐的每一行都在刘海与间隔带下方，不会被第一排遮住")
 func recommendationRowsDoNotOverlapNotchOrOpenLip() {
     let metrics = NotchAnchorLayoutMetrics(
         notchSize: CGSize(width: 180, height: 32),
@@ -235,12 +235,16 @@ func recommendationRowsDoNotOverlapNotchOrOpenLip() {
 
     #expect(metrics.panelSize == CGSize(width: 324, height: 174))
     #expect(metrics.suggestionRowFrames.count == 3)
-    #expect(metrics.suggestionRowFrames.first?.minY == metrics.openRegion.maxY + 10)
+    // 命中区现在就是刘海本体，推荐行还要再让开刘海下方那条间隔带。
+    #expect(
+        metrics.suggestionRowFrames.first?.minY
+            == metrics.openRegion.maxY + metrics.clickLipHeight + 10
+    )
     #expect(metrics.suggestionRowFrames.allSatisfy { !$0.intersects(metrics.openRegion) })
     #expect(metrics.suggestionRowFrames.last?.maxY == metrics.panelSize.height - 10)
 }
 
-@Test("一条推荐也占一整行，且仍在物理刘海与展开唇下方")
+@Test("一条推荐也占一整行，且仍在刘海命中区下方")
 func singleRecommendationStillGetsAFullRow() throws {
     let metrics = NotchAnchorLayoutMetrics(
         notchSize: CGSize(width: 180, height: 32),
@@ -254,9 +258,11 @@ func singleRecommendationStillGetsAFullRow() throws {
     // 两翼只放状态图标和关闭；标题与理由写在下面整宽的一行里，
     // 塞回两翼只剩五十来点，图标和对号都在，唯独看不出推荐的是哪一条。
     #expect(metrics.panelSize == CGSize(width: 268, height: 110))
-    #expect(metrics.openRegion == CGRect(x: 44, y: 32, width: 180, height: 26))
+    // 展开命中的就是物理刘海那一块：贴着屏幕上沿，高度等于刘海本身。
+    // 实测挖孔区域照常投递 mouseEntered/Down/Up，不需要在它下面另设一条唇。
+    #expect(metrics.openRegion == CGRect(x: 44, y: 0, width: 180, height: 32))
     let row = try #require(metrics.suggestionRowFrames.first)
-    #expect(row.minY >= metrics.openRegion.maxY)
+    #expect(row.minY >= metrics.openRegion.maxY + metrics.clickLipHeight)
     #expect(row.width > 200, "一行要有足够宽度显示标题与理由")
 
     // 没有推荐时不长出任何一行
@@ -272,7 +278,7 @@ func singleRecommendationStillGetsAFullRow() throws {
     #expect(quiet.panelSize == CGSize(width: 180, height: 58))
 }
 
-@Test("快捷回答加宽正文但刘海两翼与展开唇仍保持居中且互不重叠")
+@Test("快捷回答加宽正文但刘海两翼与命中区仍保持居中且互不重叠")
 func contextAnswerMetricsKeepTopHitRegionsCentered() {
     let metrics = NotchAnchorLayoutMetrics(
         notchSize: CGSize(width: 180, height: 32),
@@ -285,7 +291,7 @@ func contextAnswerMetricsKeepTopHitRegionsCentered() {
     )
 
     #expect(metrics.panelSize == CGSize(width: 430, height: 298))
-    #expect(metrics.openRegion == CGRect(x: 125, y: 32, width: 180, height: 26))
+    #expect(metrics.openRegion == CGRect(x: 125, y: 0, width: 180, height: 32))
     #expect(metrics.trailingWingRegion == CGRect(x: 305, y: 0, width: 44, height: 32))
     #expect(metrics.supplementalContentFrame == CGRect(x: 0, y: 110, width: 430, height: 188))
     #expect(!metrics.openRegion.intersects(metrics.trailingWingRegion))

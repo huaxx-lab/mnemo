@@ -266,6 +266,85 @@ struct NotchWorkspaceRootView: View {
     }
 }
 
+/// 工作台的面板材质：上面接着刘海的实心黑，往下化开成有厚度的玻璃。
+///
+/// 为什么必须是渐变、不能整块上玻璃：面板顶部那一段正压在**物理刘海**上
+/// （`contentTopInset` 就是刘海高度）。整块玻璃会把壁纸透到刘海那一格里，
+/// 刘海立刻从"屏幕本来就缺的一块"变成"一条颜色怪异的胶囊"——这一版之前
+/// 在收起态上原样踩过：包一层 GlassEffectContainer，黑块被 macOS 26 渲染
+/// 成 Liquid Glass，透出壁纸还带一圈光晕，就是当时被吐槽的蓝胶囊。
+///
+/// 关于"厚度"：第一版把一层不透明渐变整个盖在玻璃上，结果玻璃所有的深度
+/// 线索（边缘折射、高光）都被糊掉了，看着就是一张贴了渐变的纸片。真实玻璃
+/// 之所以有厚度，靠的是**边缘**而不是中间——顶沿有一道迎光的亮边，底沿有
+/// 一道背光的暗边，中间反而应该尽量让玻璃自己说话。所以这一版：
+/// 中段大幅减薄压暗层，把省下来的对比度还给边缘的两道光。
+private struct WorkspaceGlassBackground<S: InsettableShape>: View {
+    let shape: S
+
+    var body: some View {
+        ZStack {
+            // 玻璃底整块都在，只是上半被下面那层暗色盖住。让它整块存在而不是
+            // 只画下半，是为了避免两块材质在中间对接出一条缝。
+            Color.clear.glassEffect(.regular, in: shape)
+
+            // 压暗层：顶部仍然完全不透明（刘海那一段不许透任何东西），
+            // 但中段以下比第一版薄得多，玻璃的折射才透得出来。
+            shape.fill(
+                LinearGradient(
+                    stops: [
+                        .init(color: Style.liquid, location: 0),
+                        .init(color: Style.liquid, location: 0.20),
+                        .init(color: Style.liquid.opacity(0.74), location: 0.42),
+                        .init(color: Style.liquid.opacity(0.46), location: 0.72),
+                        .init(color: Style.liquid.opacity(0.34), location: 1),
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+
+            // 厚度之一：内壁高光。沿着形状描一圈，但**顶边一定不能有**。
+            //
+            // 面板顶边就是屏幕上沿，和刘海连成一块。在那里描任何一道亮线，
+            // 看到的就是一条把屏幕顶端横切开的缝——面板一下子从"屏幕长出来
+            // 的东西"变成"贴在屏幕上的一块板"。所以高光从刘海下沿之后才
+            // 起步，顶上那一段保持全透明。
+            shape
+                .strokeBorder(
+                    LinearGradient(
+                        stops: [
+                            .init(color: .clear, location: 0),
+                            .init(color: .clear, location: 0.16),
+                            .init(color: .white.opacity(0.16), location: 0.30),
+                            .init(color: .white.opacity(0.05), location: 0.48),
+                            .init(color: .clear, location: 0.66),
+                            .init(color: .black.opacity(0.22), location: 1),
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    ),
+                    lineWidth: 1
+                )
+
+            // 厚度之二：底沿再压一道更窄的暗边，做出"玻璃有个下缘、光在这里
+            // 拐弯"的收口。只有一道内壁高光时，底部会显得没有落点。
+            shape
+                .strokeBorder(
+                    LinearGradient(
+                        colors: [.clear, .black.opacity(0.30)],
+                        startPoint: .center,
+                        endPoint: .bottom
+                    ),
+                    lineWidth: 2.5
+                )
+                .blur(radius: 1.5)
+                .blendMode(.multiply)
+        }
+        .compositingGroup()
+    }
+}
+
 private struct WorkspaceShell: View {
     @Bindable var model: AppModel
     @State private var showsActions = false
@@ -325,23 +404,18 @@ private struct WorkspaceShell: View {
         }
         .animation(reduceMotion ? nil : .smooth(duration: 0.24).delay(0.05), value: presented)
         .frame(width: NotchLayout.panelWidth, height: NotchLayout.shellHeight)
-        .background { shape.fill(Style.shell) }
+        .background { WorkspaceGlassBackground(shape: shape) }
         .overlay {
             ZStack {
                 if model.isDropTargeted {
                     shape.strokeBorder(Style.accent.opacity(0.75), lineWidth: 1.5)
                 }
-                // 工作台展开时只亮顶部刘海轮廓，不给整张面板描边。
-                if model.edgeStatusEffectsEnabled, model.isRecognizingTodos {
-                    TodoRecognitionEdge(shape: NotchLayout.notchHuggingShape)
-                    .frame(width: NotchLayout.notchWidth + 24, height: NotchLayout.notchHeight)
-                    .frame(maxHeight: .infinity, alignment: .top)
-                } else if model.edgeStatusEffectsEnabled, let signal = model.edgeStatusSignal {
-                    EdgeStatusGlow(shape: NotchLayout.notchHuggingShape, signal: signal)
-                    .frame(width: NotchLayout.notchWidth + 24, height: NotchLayout.notchHeight)
-                    .frame(maxHeight: .infinity, alignment: .top)
-                    .id(signal)
-                }
+                // 展开态**不画**刘海轮廓光。
+                //
+                // 这圈光是收起态的通知手段：那时候刘海就是全部界面，不在它
+                // 边上亮一下就没地方说话。展开之后整张工作台都在眼前，状态
+                // 该由面板里的内容表达；顶上再套一圈光，只是在已经看得见的
+                // 东西上又描了一道边，反而把视线从内容上拽走。
             }
         }
         .onChange(of: model.mode) { _, _ in showsActions = false }
@@ -618,16 +692,17 @@ private struct CollapsedBar: View {
             }
         }
         .frame(width: metrics.panelSize.width, height: metrics.panelSize.height, alignment: .top)
-        // 交互底：刘海状态带 + 展开唇这一带必须始终收得到指针——点击展开和
-        // 悬停展开全靠它。铺一层 2% 的黑：肉眼分辨不出，窗口服务器却认它是
-        // 非透明像素。只画这一小块，面板上其余像素保持完全透明——落在卡片
-        // 之间空隙里的点击才能真正透到后面的应用，而不是被一块看不见的底板
-        // 无声吞掉（以前整块锚点都铺这层底，点别的页面"误触"就源于此）。
+        // 交互底：刘海状态带必须始终收得到指针——点击展开靠它。铺一层 2% 的
+        // 黑：肉眼分辨不出，窗口服务器却认它是非透明像素。
+        //
+        // 高度**只到刘海下沿**，不再往下多铺那条唇。展开命中区已经搬到刘海
+        // 本体，唇不再有任何交互意义；继续铺着的唯一效果，就是在刘海下面留
+        // 一条看得见的半透明色块，还顺手吃掉本该落到下层应用的点击。
         .background(alignment: .top) {
             Color.black.opacity(0.02)
                 .frame(
                     width: metrics.notchSize.width + metrics.wingWidth * 2,
-                    height: metrics.notchSize.height + metrics.clickLipHeight
+                    height: metrics.notchSize.height
                 )
         }
         // 整块只有一层底色，两翼、唇和推荐行连成同一个形体。没有推荐时黑色
@@ -648,8 +723,8 @@ private struct CollapsedBar: View {
             // 反馈从来没真正显示过。识别中的轻光同样不依赖黑底，两者待遇
             // 保持一致。
             //
-            // 宽度必须严丝合缝等于 notchWidth，不能像工作台那份一样再加
-            // 24——安静态的窗口本身就只有 notchWidth 那么宽（没有两翼），
+            // 宽度必须严丝合缝等于 notchWidth：安静态的窗口本身就只有
+            // notchWidth 那么宽（没有两翼），
             // 比这圈光的取景框还窄，多出来的部分会被窗口边界整段裁掉：
             // 剩下的不是一整圈，而是贴着顶边的一小段线，两侧竖线全没了。
             // 这正是"刘海外部多出一圈、看着像一条线"的真实成因。
@@ -664,6 +739,12 @@ private struct CollapsedBar: View {
                 EdgeStatusGlow(shape: NotchLayout.notchHuggingShape, signal: signal)
                     .frame(width: NotchLayout.notchWidth, height: NotchLayout.notchHeight)
                     .id(signal)
+            } else if model.isNotchHovered {
+                // 排在最后：应用自己在忙（识别中）或有状态要报时，那两圈更
+                // 要紧，不能被"你可以点我"盖过去。
+                NotchBreathingEdge(shape: NotchLayout.notchHuggingShape)
+                    .frame(width: NotchLayout.notchWidth, height: NotchLayout.notchHeight)
+                    .transition(.opacity)
             }
         }
         // 工作台展开时刘海缩进淡出（像被面板"吸收"）；收起时等面板缩过一半
@@ -2254,10 +2335,17 @@ private struct StashWorkspace: View {
     @State private var isOverPinBoundary = false
     /// 页签切换过渡用的透明度。1 是常态；切页签那一瞬间先压到 0.35 再弹回。
     @State private var trackFade: Double = 1
+    /// 切页签时轨道整体的一点纵向位移。只有明暗变化时，眼睛读到的是"闪"，
+    /// 加一点同向的位移才读得出"换了一页"。
+    @State private var trackShift: CGFloat = 0
     @State private var tabTransitionTask: Task<Void, Never>?
     @State private var platformRowExpanded = false
     @State private var folderRowExpanded = false
     @State private var edgeScrollTask: Task<Void, Never>?
+    /// 边缘自动翻页进行中。这期间整条轨道都在动，逐卡的插入位置每一帧都在
+    /// 变——把那根竖线画出来只会让人觉得它在乱跳。用户此刻表达的是"再往前
+    /// 带一点"，不是"插到这两张中间"，等他停下来再说插哪儿。
+    @State private var isEdgeScrolling = false
 
     /// 搜索出结果时上半屏是模型的回答，下半屏是它推荐的真实 Pin。
     /// 此时不显示分类页签——分类会把命中的条目悄悄过滤掉。
@@ -2348,8 +2436,20 @@ private struct StashWorkspace: View {
                             // 位置只能是钉住区最后一张之后。
                             let firstLoose = entries.firstIndex { !isPinnedEntry($0) }
                                 ?? entries.count
+                            // 没有钉住卡片、也没在拖拽时，这条分界**不进入布局**。
+                            //
+                            // 它在这种状态下两个子视图宽度都是 0，但
+                            // `HStack(spacing: 6)` 的间距照样算——自身占 6pt，再
+                            // 加 LazyHStack 给它和首卡之间的 8pt，凭空在队首多出
+                            // 14pt。于是"没钉住任何卡片"时左边距是 26pt，"钉住了
+                            // 一张"时分界改插到两区中间、队首换成真卡片，又变回
+                            // 12pt——同一个位置两个值，就是用户看到的"间距不统一"。
+                            //
+                            // 拖拽时仍然要插：那条线是"拖到这儿就钉住"的唯一提示，
+                            // 没有它用户不知道能往哪儿放。
+                            let showsBoundary = firstLoose > 0 || model.outboundDrag?.itemID != nil
                             ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
-                                if index == firstLoose {
+                                if index == firstLoose, showsBoundary {
                                     PinBoundary(
                                         model: model,
                                         isTargeted: $isOverPinBoundary,
@@ -2399,12 +2499,14 @@ private struct StashWorkspace: View {
                                         )
                                     )
                                     .overlay(alignment: .leading) {
-                                        if reorderTargetID == collection.id, !reorderInsertAfter {
+                                        if reorderTargetID == collection.id, !reorderInsertAfter,
+                                           !isEdgeScrolling {
                                             insertionIndicator.offset(x: -5.5)
                                         }
                                     }
                                     .overlay(alignment: .trailing) {
-                                        if reorderTargetID == collection.id, reorderInsertAfter {
+                                        if reorderTargetID == collection.id, reorderInsertAfter,
+                                           !isEdgeScrolling {
                                             insertionIndicator.offset(x: 5.5)
                                         }
                                     }
@@ -2504,6 +2606,22 @@ private struct StashWorkspace: View {
                             }
                         }
                         .padding(.vertical, 8)
+                        // 左右留白必须长在**内容里**，不能用 contentMargins。
+                        //
+                        // contentMargins 只有 SwiftUI 知道；而这条轨道的翻页和
+                        // 回弹是 AppKit 在管（CardTrackScrollController 直接操作
+                        // NSClipView），它收敛的目标是 documentView.bounds.minX。
+                        // 两套系统对"内容从哪里开始"的认识于是差了整整 12pt：
+                        // 刚打开是 SwiftUI 摆的位置，用户手滑一下之后回弹按
+                        // AppKit 的口径归位，左边距当场变一个值——用户实报
+                        // "弹回来的归位位置就错了，边界变大了"。
+                        //
+                        // 原注释说"用 padding 的话 scrollTo 会把留白一起滚掉"，
+                        // 那是针对 SwiftUI 的 scrollTo；这条轨道根本没用它
+                        // （只有 scrollController.scrollToStart()，走的就是
+                        // documentView 口径），所以这里改回 padding 反而让两边
+                        // 说的是同一件事。
+                        .padding(.horizontal, 12)
                         // 探针必须住在 documentView 内部，才能稳定拿到
                         // enclosingScrollView；挂在 ScrollView 外层 background 上时
                         // 某些 SwiftUI 层级会得到 nil，箭头就“看得到但点不动”。
@@ -2534,7 +2652,34 @@ private struct StashWorkspace: View {
                     // 两者画出来一样，但 scrollTo 只认前者：用 padding 时，
                     // "滚到第一张"会把那 12pt 一起滚出视野，第一张直接贴住左边，
                     // 和平时的间距对不上——双击标题栏跳回开头就会看到这个。
-                    .contentMargins(.horizontal, 12, for: .scrollContent)
+                    // 两端渐隐。
+                    //
+                    // 左边距是规规矩矩的 12pt，右边却常常是 0——因为右边那张
+                    // 卡根本不是"最后一张"，而是横向滚动溢出的内容，被面板圆角
+                    // 边框齐根切断。实测：面板 600pt，末卡从 564pt 起，切掉一大
+                    // 半，右边距量出来 0.5pt。两边于是完全不像一回事。
+                    //
+                    // 加大 contentMargins 治不了它：被切的是溢出内容，不是边距。
+                    // 让内容在够到边框之前先淡掉，硬切就不存在了，顺带还告诉
+                    // 用户"这个方向还有东西"。遮罩不参与布局，`scrollTo` 的行为
+                    // 也不受影响。
+                    .mask {
+                        LinearGradient(
+                            stops: [
+                                // 淡出必须**很窄**：第一版给了 2.8%（600pt 面板上
+                                // 是 17pt），而首卡本来就只从 12pt 起——整个左沿
+                                // 被洗掉，看起来就是"卡片离边界很远"。这里收到
+                                // 1%（6pt），只够把边框上那道硬切边化掉，不吃到
+                                // 卡片本身。
+                                .init(color: .clear, location: 0),
+                                .init(color: .black, location: 0.010),
+                                .init(color: .black, location: 0.990),
+                                .init(color: .clear, location: 1),
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    }
 
                     // 「拖到空白处 = 离开当前的区」这一层必须铺满整条轨道，
                     // 而不是贴在卡片那一排的背景上——那个背景正好就是卡片本身
@@ -2566,6 +2711,7 @@ private struct StashWorkspace: View {
                     .overlay(alignment: .leading) { edgeScroller(forward: false) }
                     .overlay(alignment: .trailing) { edgeScroller(forward: true) }
                 .opacity(trackFade)
+                .offset(y: trackShift)
                 .frame(height: isAnswering ? cardTrackHeight : nil)
                 .frame(maxHeight: isAnswering ? nil : CGFloat.infinity)
                 // 拖拽一结束就把所有投放态的残留清掉。
@@ -2613,7 +2759,10 @@ private struct StashWorkspace: View {
         // 边缘带。两层叠在同一批像素上时，顶层的 drop strip 会截胡底下的按钮。
         if model.outboundDrag != nil, canPage(forward: forward) {
             Color.clear
-                .frame(width: forward ? 28 : 8)
+                // 左右必须等宽。原来右 28、左 8：往右拖极易撞进感应带触发
+                // 自动翻页，往左几乎撞不进去——用户实报"右滑抽搐、左滑没事"，
+                // 一半原因就在这个宽度差上。
+                .frame(width: 16)
                 .contentShape(Rectangle())
                 .onDrop(
                     of: [UTType.data],
@@ -2635,9 +2784,17 @@ private struct StashWorkspace: View {
         stopEdgeScroll()
         edgeScrollTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(220))
+            isEdgeScrolling = true
+            defer { isEdgeScrolling = false }
+            // 小步快走，而不是大步一顿一顿。
+            //
+            // 原来每 230ms 翻 0.28 屏、每次还带 0.16s 动画：两次翻页之间有明显
+            // 停顿，内容"跳一下、停一下"，而每跳一次指针底下的卡片就换一张、
+            // 各卡的投放代理跟着 enter/exit 一轮——叠起来就是抽搐。
+            // 现在每 40ms 挪一小段，看上去是匀速滑过去的。
             while !Task.isCancelled, model.outboundDrag != nil {
-                guard page(forward: forward, fraction: 0.28, duration: 0.16) else { return }
-                try? await Task.sleep(for: .milliseconds(230))
+                guard page(forward: forward, fraction: 0.05, duration: 0.04) else { return }
+                try? await Task.sleep(for: .milliseconds(40))
             }
         }
     }
@@ -2694,11 +2851,20 @@ private struct StashWorkspace: View {
         guard tab != model.activeTab else { return }
         tabTransitionTask?.cancel()
         tabTransitionTask = Task { @MainActor in
-            withAnimation(.easeOut(duration: 0.09)) { trackFade = 0.18 }
-            try? await Task.sleep(for: .milliseconds(90))
+            // 出场用 easeIn（起步慢、收尾快）而不是 easeOut：出场的重点是
+            // "尽快让旧内容消失"，easeOut 反过来是一上来就掉、末尾拖着，
+            // 眼睛看到的就是"闪一下再慢慢暗"。
+            //
+            // 淡到 **0** 而不是 0.18：之前留着 18% 亮度，等于让用户正好看见
+            // 内容被换掉的那一帧——顿挫感就是从这里来的。全暗之后再换，
+            // 换页这件事在视觉上就不存在了。
+            withAnimation(.easeIn(duration: 0.08)) {
+                trackFade = 0
+                trackShift = -6
+            }
+            try? await Task.sleep(for: .milliseconds(80))
             guard !Task.isCancelled else {
-                // 被下一次点击取消也要把亮度还回去，否则整条轨道永远停在 0.18。
-                withAnimation(.easeOut(duration: 0.12)) { trackFade = 1 }
+                withAnimation(.easeOut(duration: 0.12)) { trackFade = 1; trackShift = 0 }
                 return
             }
             if tab == .privateSpace, !model.isPrivateSpaceUnlocked {
@@ -2707,7 +2873,12 @@ private struct StashWorkspace: View {
             model.activeTab = tab
             // 新布局下一拍才生成。先让它布好局，再淡入，避免边算布局边动。
             await Task.yield()
-            withAnimation(.easeOut(duration: 0.16)) { trackFade = 1 }
+            // 入场从下方 6pt 浮上来：和出场的方向相反，读起来是"这一页顶上来了"。
+            trackShift = 6
+            withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                trackFade = 1
+                trackShift = 0
+            }
             tabTransitionTask = nil
         }
     }
@@ -6094,6 +6265,48 @@ private struct QuickActionBar: View {
         case .askPDF: "对这篇 PDF 提问"
         default: title(action)
         }
+    }
+}
+
+/// 指针停在刘海上时的呼吸反馈：**刘海自己微微鼓大**。
+///
+/// 一开始做成了一圈描边，但那是在刘海"旁边"加东西——用户报告"什么反应都
+/// 看不到"。真正读得出来的反馈是刘海本体在动：底下多出一小段同色的黑，
+/// 缓慢地一进一出，看上去就是这块挖孔自己在呼吸。
+///
+/// 只往下长，不往两边：收起态的窗口宽度**严格等于刘海宽度**，往两侧多出
+/// 的任何像素都会被窗口边界整段裁掉，只会看到两条硬邦邦的竖切边。往下是
+/// 唯一有余量的方向（下面还有一条唇那么高的空间）。
+private struct NotchBreathingEdge<S: Shape>: View {
+    let shape: S
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var breathing = false
+
+    /// 鼓出来的那一小段。再大就不像"呼吸"而像"弹出了个东西"了。
+    private let bulge: CGFloat = 5
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Spacer(minLength: 0)
+            shape
+                .fill(Color.black)
+                .frame(height: NotchLayout.notchHeight + (breathing ? bulge : 0))
+                .overlay(alignment: .bottom) {
+                    // 底沿一道极淡的高光，让"长出来"这件事有个边界，
+                    // 不然纯黑贴纯黑，动了也看不出来。
+                    shape
+                        .stroke(Color.white.opacity(breathing ? 0.16 : 0.05), lineWidth: 0.8)
+                        .frame(height: NotchLayout.notchHeight + (breathing ? bulge : 0))
+                }
+        }
+        .frame(height: NotchLayout.notchHeight, alignment: .top)
+        .animation(
+            reduceMotion ? nil : .easeInOut(duration: 1.5).repeatForever(autoreverses: true),
+            value: breathing
+        )
+        .onAppear { breathing = true }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
 

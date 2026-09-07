@@ -324,8 +324,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let screen = NotchGeometry.preferredScreen else { return false }
         screenFrame = screen.frame
         notchRect = NotchGeometry.notchRect(on: screen)
-        NotchLayout.notchWidth = max(notchRect.width, 180)
-        NotchLayout.notchHeight = max(notchRect.height, 30)
+        // 有刘海就**原样用量出来的尺寸**，不再往上取整到 180。
+        //
+        // 这个下限本来是给没有刘海的机器兜底的，但它对真实刘海同样生效：
+        // 实测这台机器的刘海是 179.0pt 宽，被抬到 180 之后，所有"贴着刘海画"
+        // 的描边都比刘海本身宽出 1pt——两边各多半点，正好是那圈光看着没贴住
+        // 边的原因。没有刘海时 `notchRect` 给的是屏幕顶部中央的等效条带
+        // （220pt 宽），本来就用不着这个下限。
+        let hasNotch = NotchGeometry.hasNotch(screen)
+        NotchLayout.notchWidth = hasNotch ? notchRect.width : max(notchRect.width, 180)
+        NotchLayout.notchHeight = hasNotch ? notchRect.height : max(notchRect.height, 30)
         // 640 在刘海下面偏宽，但收到 560 又显局促：600 正好让三张 176pt 的卡片
         // 铺满一行，右边不再空一大片。
         NotchLayout.panelWidth = min(600, max(500, screen.visibleFrame.width - 32))
@@ -457,17 +465,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return .zero }
             return self.anchorMetrics().panelSize
         }
+        // 呼吸反馈只认物理刘海本体，和展开命中区是同一块，别让用户在 A 处
+        // 看到反馈却要去 B 处点。
+        anchorHost.notchHoverRegion = { [weak self] in
+            guard let self else { return .zero }
+            return self.anchorMetrics().openRegion
+        }
+        anchorHost.onNotchHoverChanged = { [weak self] hovering in
+            guard let self else { return }
+            // 工作台已经开着、或正在拖拽时不提示：那时候点刘海不是展开。
+            let allowed = self.model.workspacePhase == .hidden && !self.isDragArmed
+            self.model.isNotchHovered = hovering && allowed
+        }
         anchorHost.hoverExpandRegion = { [weak self] in
             guard let self else { return .zero }
             let metrics = self.anchorMetrics()
-            // 状态带 + 展开唇，和点击唇那一带完全重合：指针悬停或点下去，同一语义。
-            let statusWidth = metrics.notchSize.width + metrics.wingWidth * 2
-            return CGRect(
-                x: (metrics.panelSize.width - statusWidth) / 2,
-                y: 0,
-                width: statusWidth,
-                height: metrics.notchSize.height + metrics.clickLipHeight
-            )
+            // 悬停感应和点击命中必须是同一块：都只认物理刘海本体。
+            //
+            // 之前这里多算了刘海下方那条唇（`clickLipHeight`），于是"悬停"
+            // 模式下指针停在刘海**外面**也会展开——而刘海正下方就是菜单栏，
+            // 指针每天要路过很多次。点击那一侧已经收回刘海本体了，这一侧
+            // 不跟上就成了两套说法。
+            return metrics.openRegion
         }
         anchorHost.canHoverExpand = { [weak self] in
             guard let self, self.model.expandTrigger.allowsHover else { return false }

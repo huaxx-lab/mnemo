@@ -3,6 +3,9 @@ import CryptoKit
 import Foundation
 import LocalAuthentication
 import Observation
+// 只为 reload(animation:) 那一处：用户主动触发的重排要看得见位移。
+// 真正要守住的边界是 MnemoCore 不依赖 UI，这里是 app 层，不越界。
+import SwiftUI
 import MnemoCore
 import MnemoStore
 import UniformTypeIdentifiers
@@ -529,6 +532,11 @@ final class AppModel {
     }
 
     /// 刘海用什么手势展开。窗口层每一拍都读它来决定要不要武装悬停计时。
+    /// 指针此刻在不在物理刘海里。只驱动收起态那圈呼吸反馈——它表达的是
+    /// "这里可以点"，不是"就要展开了"，所以和 `expandTrigger` 无关，两种
+    /// 触发方式下都该有。
+    var isNotchHovered = false
+
     var expandTrigger: NotchExpandTrigger {
         didSet {
             UserDefaults.standard.set(expandTrigger.rawValue, forKey: Self.expandTriggerKey)
@@ -4320,7 +4328,10 @@ final class AppModel {
 
     // MARK: - Ingest and persistence
 
-    func reload() async {
+    /// - Parameter animation: 只有**用户刚做完一个会改变排序的动作**时才传。
+    ///   后台索引完成、链接元数据回来、待办扫描结束同样调 `reload`，那些
+    ///   刷新用户没有预期，给它们挂动画就是整排卡片莫名其妙地自己动。
+    func reload(animation: Animation? = nil) async {
         // 拖拽进行中不改写 items。索引完成、链接元数据、待办扫描都会触发
         // reload；让它们落进松手后的那一次。
         guard outboundDrag == nil else {
@@ -4329,7 +4340,12 @@ final class AppModel {
         }
         await drainReorderPersistence()
         do {
-            items = try await library.items()
+            let fresh = try await library.items()
+            if let animation {
+                withAnimation(animation) { items = fresh }
+            } else {
+                items = fresh
+            }
             trashedItems = try await library.items(includingTrashed: true)
                 .filter { $0.state == .trashed }
             // 隐私条目删掉之后仍然是隐私的：锁着的时候回收站里也不能出现，
@@ -4881,7 +4897,10 @@ final class AppModel {
                 )
                 for item in evicted { cancelQueuedAI(for: item.id) }
             }
-            await reload()
+            // 钉住会让这张卡从临时轨道跳到最前，整排跟着重排——这是用户
+            // **刚按下按钮**换来的位移，必须看得见它是怎么挪过去的。不挂动画
+            // 时整排瞬移，手感就是"啪"地一下弹回去。
+            await reload(animation: .spring(response: 0.34, dampingFraction: 0.82))
             // 固定后后台状态会接管反馈，不再用“已锁定保留”覆盖识别过程。
             if !isPinned { showTransientFeedback("已放回临时轨道") }
         } catch {

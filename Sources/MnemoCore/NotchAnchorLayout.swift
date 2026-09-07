@@ -75,15 +75,25 @@ public struct NotchAnchorLayoutMetrics: Equatable, Sendable {
         )
     }
 
-    /// 真正能点到的展开唇，只在物理刘海正下方；不会覆盖推荐按钮或两侧菜单栏。
+    /// 展开的命中区：**物理刘海本体**。
+    ///
+    /// 以前这块在刘海正下方——一条叫"接触唇"的带子，理由是"物理挖孔没有像素，
+    /// 点不到"。这个前提是错的：实测把面板铺在真实刘海矩形上，
+    /// `mouseEntered` / `mouseDown` / `mouseUp` 全都照常投递。挖孔挡住的只是
+    /// 显示，事件该怎么走还怎么走。
+    ///
+    /// 于是接触唇带来的都是纯粹的代价：它压在菜单栏上（那是指针每天要路过
+    /// 很多次的地方），点它展开这件事本身也不直观——用户想点的是刘海，
+    /// 不是刘海底下那条看不见的边。现在命中区就是刘海本身，指针进去有呼吸
+    /// 反馈，点一下展开。
     public var openRegion: CGRect {
         let statusWidth = notchSize.width + wingWidth * 2
         let statusOriginX = (panelSize.width - statusWidth) / 2
         return CGRect(
             x: statusOriginX + wingWidth,
-            y: notchSize.height,
+            y: 0,
             width: notchSize.width,
-            height: clickLipHeight
+            height: notchSize.height
         )
     }
 

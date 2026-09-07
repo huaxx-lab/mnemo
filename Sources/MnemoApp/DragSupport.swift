@@ -62,6 +62,12 @@ final class NotchAnchorHostingView<Content: View>: NSHostingView<Content> {
     var canHoverExpand: () -> Bool = { false }
     var onHoverExpand: (() -> Void)?
 
+    /// 指针在不在**物理刘海**里。只用来驱动呼吸反馈，和展开与否无关——
+    /// 呼吸是"这里可以点"的提示，不是"马上要展开了"的倒计时。
+    var notchHoverRegion: () -> CGRect = { .zero }
+    var onNotchHoverChanged: ((Bool) -> Void)?
+    private var isHoveringNotch = false
+
     private var hoverTrackingArea: NSTrackingArea?
     private var hoverDwellTask: Task<Void, Never>?
     private var hoverDwellGeneration = 0
@@ -70,9 +76,16 @@ final class NotchAnchorHostingView<Content: View>: NSHostingView<Content> {
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+    /// - Important: `hitTest` 收到的点在**父视图**坐标系里，而其余命中判断
+    ///   （`mouseDown` / `mouseUp`）用的是 `convert(_:from: nil)` 换算出的
+    ///   **本视图**坐标。本视图是 flipped 的，`topDown` 对它是恒等变换——
+    ///   于是直接拿父视图的点去比，等于把一个"从下往上量"的 y 当成"从上往下
+    ///   量"，命中区上下整个翻了个个儿：`hitTest` 说在区里，`mouseUp` 说不在，
+    ///   点击就这么被吞掉。先换算到本视图坐标，两边才说的是同一件事。
     override func hitTest(_ point: NSPoint) -> NSView? {
-        guard isVisible(point) else { return nil }
-        if isInsideOpenRegion(point) || regionIndex(at: point) != nil { return self }
+        let local = superview.map { convert(point, from: $0) } ?? point
+        guard isVisible(local) else { return nil }
+        if isInsideOpenRegion(local) || regionIndex(at: local) != nil { return self }
         return super.hitTest(point)
     }
 
@@ -95,13 +108,31 @@ final class NotchAnchorHostingView<Content: View>: NSHostingView<Content> {
     }
 
     override func mouseMoved(with event: NSEvent) {
-        updateHoverDwell(at: convert(event.locationInWindow, from: nil))
+        let point = convert(event.locationInWindow, from: nil)
+        updateHoverDwell(at: point)
+        updateNotchHover(at: point)
         super.mouseMoved(with: event)
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        updateNotchHover(at: convert(event.locationInWindow, from: nil))
+        super.mouseEntered(with: event)
     }
 
     override func mouseExited(with event: NSEvent) {
         cancelHoverDwell()
+        setNotchHover(false)
         super.mouseExited(with: event)
+    }
+
+    private func updateNotchHover(at point: NSPoint) {
+        setNotchHover(notchHoverRegion().contains(topDown(point)))
+    }
+
+    private func setNotchHover(_ value: Bool) {
+        guard isHoveringNotch != value else { return }
+        isHoveringNotch = value
+        onNotchHoverChanged?(value)
     }
 
     /// 进出命中区才改变驻留状态：在里面挪动不重启计时，划出边界立即作废。
