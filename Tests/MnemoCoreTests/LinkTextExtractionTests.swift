@@ -149,6 +149,52 @@ func navigationJunkDoesNotCountAsProse() {
 @Suite("站点结构化抽取")
 struct SiteContentExtractionTests {
 
+    @Test("B 站视频页推导出官方 view 接口地址，非视频页不推")
+    func bilibiliAPIURL() {
+        #expect(
+            SiteContentExtraction.Bilibili.videoAPIURL(
+                for: URL(string: "https://www.bilibili.com/video/BV1GJ411x7h7")!
+            )?.absoluteString == "https://api.bilibili.com/x/web-interface/view?bvid=BV1GJ411x7h7"
+        )
+        // 分 P 参数不影响推导。
+        #expect(
+            SiteContentExtraction.Bilibili.videoAPIURL(
+                for: URL(string: "https://www.bilibili.com/video/BV1GJ411x7h7?p=2&t=30")!
+            )?.absoluteString == "https://api.bilibili.com/x/web-interface/view?bvid=BV1GJ411x7h7"
+        )
+        // 旧制 av 号走 aid 参数。
+        #expect(
+            SiteContentExtraction.Bilibili.videoAPIURL(
+                for: URL(string: "https://www.bilibili.com/video/av80433022")!
+            )?.absoluteString == "https://api.bilibili.com/x/web-interface/view?aid=80433022"
+        )
+        // 专栏、直播、别的站点都不该被当成视频页。
+        #expect(SiteContentExtraction.Bilibili.videoAPIURL(
+            for: URL(string: "https://www.bilibili.com/read/cv123")!) == nil)
+        #expect(SiteContentExtraction.Bilibili.videoAPIURL(
+            for: URL(string: "https://example.com/video/BV1GJ411x7h7")!) == nil)
+    }
+
+    @Test("B 站接口失败时绝不把平台文案当标题写回")
+    func bilibiliRejectsFailureEnvelope() {
+        let failure = #"{"code":-404,"message":"啥都木有","data":null}"#
+        #expect(SiteContentExtraction.Bilibili.extract(
+            fromViewJSON: Data(failure.utf8)) == nil)
+
+        let ok = #"{"code":0,"message":"0","data":{"title":"真标题","desc":"-"}}"#
+        let extracted = SiteContentExtraction.Bilibili.extract(fromViewJSON: Data(ok.utf8))
+        #expect(extracted?.title == "真标题")
+        // desc 只有一个 "-"，不该被当成正文喂进 RAG。
+        #expect(extracted?.text.isEmpty == true)
+        #expect(extracted?.summary == nil)
+    }
+
+    @Test("B 站风控降级页的标题被当作占位，不锁死卡片名字")
+    func bilibiliPlaceholderTitleRejected() {
+        #expect(LinkTextExtraction.isFailurePlaceholderTitle("视频内容待识别"))
+        #expect(!LinkTextExtraction.isFailurePlaceholderTitle("【官方 MV】Never Gonna Give You Up"))
+    }
+
     @Test("Discourse 话题页推导出 .json 地址")
     func discourseTopicJSONURL() throws {
         let plain = try #require(URL(string: "https://linux.do/t/topic/2808529"))

@@ -4084,14 +4084,14 @@ private struct CardGroupAccordion: View {
     /// 纸边错开多少。悬停时错得更开一点，像被手指拨了一下。
     /// 悬停时纸边错得更开。占位按最大那一档算，见 `collapsed` 的 frame：
     /// 只有画出来的位置在动，这一格占多宽从头到尾不变。
-    private static let hoverTile: (x: CGFloat, y: CGFloat) = (9, 7)
+    private static let hoverTile: (x: CGFloat, y: CGFloat) = (9, 5)
     private var tile: (x: CGFloat, y: CGFloat) { hovering ? Self.hoverTile : Self.restTile }
     /// **布局**用的那一份，永远是静止值。
     ///
     /// 让 frontHeight 跟着 hover 走会连锁：卡面高度变 → 缩略图边长变 →
     /// 文字重排。鼠标一进来整张卡的字就跳一下，那不是"响应"，是抖动。
     /// 动效只让后面几张纸动，前面这张的尺寸从头到尾不变。
-    private static let restTile: (x: CGFloat, y: CGFloat) = (7, 5)
+    private static let restTile: (x: CGFloat, y: CGFloat) = (6, 3)
     private var sheetDepths: [Int] { Array(1...min(2, max(1, members.count - 1))) }
     private var shape: RoundedRectangle {
         RoundedRectangle(cornerRadius: Style.cardRadius, style: .continuous)
@@ -4132,28 +4132,36 @@ private struct CardGroupAccordion: View {
 
     private var collapsed: some View {
         ZStack(alignment: .topLeading) {
-            ForEach(sheetDepths.reversed(), id: \.self) { depth in
-                shape
-                    .fill(Style.ink)
-                    .overlay { shape.fill(tint.opacity(0.2 - Double(depth) * 0.05)) }
-                    .overlay {
-                        shape.strokeBorder(
-                            tint.opacity(0.55 - Double(depth) * 0.14), lineWidth: 1
-                        )
-                    }
-                    .frame(width: PinCard.width, height: frontHeight)
-                    .offset(x: CGFloat(depth) * tile.x, y: CGFloat(depth) * tile.y)
-                    .shadow(color: Color.black.opacity(0.25), radius: 4, x: 1, y: 1)
-            }
+            sheets
             folderFace
                 .frame(width: PinCard.width, height: frontHeight, alignment: .topLeading)
-                .background { shape.fill(Style.ink) }
-                .overlay { shape.fill(tint.opacity(0.06)) }
+                // 和 PinCard 一模一样的卡面：半透明的白，直接压在玻璃台面上。
+                //
+                // 上一版给它垫了一层不透明的 liquid，好让前面这张挡住后面的
+                // 纸边。代价是整摞变成台面上唯一一块死黑：面板下半截的玻璃
+                // 本来就透着桌面、比 liquid 亮，于是这一摞看着像在台面上挖了
+                // 个洞，比旁边任何一张卡都沉。挡后面那件事改由 `sheets` 自己
+                // 把身子挖掉来解决，卡面就不必再背这个包袱。
+                // 比普通卡片再抬亮一档（8% 对 6.5%）。分组是个容器，它得先
+                // 是"一块东西"，才谈得上里面装了什么；和单卡一样亮的时候，
+                // 它整个化进台面里，只剩几个零件浮在上面。
+                .background(hovering ? Style.surfaceHover : Style.contentElevated, in: shape)
+                // 青边找回来了，但只描**这一圈**。
+                //
+                // 最早那版是正脸和后面两张纸边各描一圈，三个青框套在一起才吵；
+                // 现在纸边只留很淡的一道，颜色集中在最外这一圈上，既认得出是
+                // 分组，也不糊。
                 .overlay {
-                    shape.strokeBorder(tint.opacity(hovering ? 0.6 : 0.38), lineWidth: 1)
+                    shape.strokeBorder(tint.opacity(hovering ? 0.6 : 0.32), lineWidth: 1)
                 }
-                .clipShape(shape)
-                .shadow(color: Color.black.opacity(0.32), radius: 6, x: 2, y: 2)
+                // 静止时就得有投影。一摞纸是实物，不落影子就浮不起来——上一版
+                // 抄了 PinCard 的"悬停才有影"，可 PinCard 满脸是内容、自己有
+                // 分量，文件夹脸空得多，没影子就贴死在台面上了。
+                .shadow(
+                    color: Color.black.opacity(hovering ? 0.42 : 0.3),
+                    radius: hovering ? 12 : 6,
+                    y: hovering ? 5 : 3
+                )
         }
         .frame(
             width: PinCard.width + CGFloat(sheetDepths.count) * Self.hoverTile.x,
@@ -4169,34 +4177,74 @@ private struct CardGroupAccordion: View {
         .transition(.opacity)
     }
 
+    /// 后面那几张纸边。整张画出来，再把最前面那张占的位置**挖掉**，只留探出
+    /// 来的那一圈。
+    ///
+    /// 要挖是因为卡面是半透明的：不挖的话，后面两张的边和描线会整个从正脸
+    /// 底下透上来，和标题、缩略图叠在一起。而"给正脸垫一层不透明底"是上一版
+    /// 的解法，那会让整摞比台面还黑（见 `collapsed` 里那段）。挖掉之后前后
+    /// 都能透光，亮度和旁边的卡片一致，层次只由亮度台阶和发丝线来说。
+    private var sheets: some View {
+        ZStack(alignment: .topLeading) {
+            ForEach(sheetDepths.reversed(), id: \.self) { depth in
+                shape
+                    .fill(sheetWash(depth: depth))
+                    .overlay {
+                        shape.strokeBorder(
+                            tint.opacity(0.3 - Double(depth) * 0.08), lineWidth: 1
+                        )
+                    }
+                    .frame(width: PinCard.width, height: frontHeight)
+                    .offset(x: CGFloat(depth) * tile.x, y: CGFloat(depth) * tile.y)
+            }
+        }
+        // 必须显式撑到整摞的最大范围：ZStack 的尺寸只按子视图的 frame 算，
+        // offset 不进布局。不撑开的话下面那层遮罩只有一张卡那么大，探出去的
+        // 纸边正好落在遮罩外面，被整条剪掉。
+        .frame(
+            width: PinCard.width + CGFloat(sheetDepths.count) * Self.hoverTile.x,
+            height: frontHeight + CGFloat(sheetDepths.count) * Self.hoverTile.y,
+            alignment: .topLeading
+        )
+        .compositingGroup()
+        .mask(alignment: .topLeading) {
+            Rectangle()
+                .fill(Color.white)
+                .overlay(alignment: .topLeading) {
+                    shape
+                        .fill(Color.black)
+                        .frame(width: PinCard.width, height: frontHeight)
+                        .blendMode(.destinationOut)
+                }
+                .compositingGroup()
+        }
+    }
+
     /// 折叠态画的是**文件夹自己**，不是里面第一张卡。
     ///
-    /// 之前直接摆第一张卡的完整卡面，读出来是"一张叫 xxx 的卡片顺便贴了个
-    /// 文件夹标签"——组名被挤在标题旁边，而卡片正文占满了整张脸。文件夹要被
-    /// 一眼认出来靠的是名字和"里面有什么"，所以：缩略图换成成员的九宫格
-    /// （像手机上的应用文件夹），标题位置让给组名，副标题列成员的名字。
+    /// 版面是上下三段：标题占满整宽，缩略图排成一条，计数和箭头钉在下沿。
+    ///
+    /// 之前是"左图右字"：九宫格占掉左边一半，标题被挤进右边 90pt 的窄栏，
+    /// 副标题（几个成员名拼起来的那行）一上来就截成「【AI与AI安全】…」，
+    /// 读不出任何东西；而卡片下半张整个空着，一大片黑。三个毛病是同一个
+    /// 成因——横着切一刀，两边都不够用。改成横着摊开之后：标题有整宽
+    /// 160pt，缩略图从 28pt 长到 37pt，底栏贴着下沿，中间那片空白没有了。
+    ///
+    /// 副标题直接去掉：它要回答的"里面装了什么"，四张缩略图答得比一行
+    /// 截断的文件名好得多。
     private var folderFace: some View {
         VStack(alignment: .leading, spacing: 7) {
-            HStack(alignment: .top, spacing: 9) {
-                memberGrid
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "folder.fill")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(tint)
-                        Text(group.name)
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(Style.primary)
-                            .lineLimit(1)
-                    }
-                    Text(memberSummary)
-                        .font(.system(size: 10))
-                        .foregroundStyle(Style.tertiary)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
-                }
+            HStack(spacing: 5) {
+                Image(systemName: "folder.fill")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(tint)
+                Text(group.name)
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(Style.primary)
+                    .lineLimit(1)
                 Spacer(minLength: 0)
             }
+            memberStrip
             Spacer(minLength: 0)
             HStack(spacing: 5) {
                 Text("\(members.count) 张")
@@ -4214,30 +4262,54 @@ private struct CardGroupAccordion: View {
         .padding(8)
     }
 
+    /// 纸边的明度阶梯：越靠后越暗，像压在下面的那几张接受的光更少。正脸是
+    /// 6.5% 的白，后面依次减。深度靠亮度衰减读出来，不需要额外的颜色——
+    /// 之前反过来，越靠后青色越浓，后面两张比正脸还扎眼。
+    private func sheetWash(depth: Int) -> Color {
+        Color.white.opacity(0.075 - Double(depth) * 0.018)
+    }
+
     /// 最前面那张的高度：整摞外框减去后面几层往下错开的那一段。
     private var frontHeight: CGFloat {
         availableHeight - CGFloat(sheetDepths.count) * Self.hoverTile.y
     }
 
-    /// 成员缩略图拼成的小格子。数量决定几宫格，最多四张。
-    private var memberGrid: some View {
-        let side = min(74, max(40, frontHeight - 54))
-        let cell = (side - 3) / 2
-        return LazyVGrid(
-            columns: [GridItem(.fixed(cell), spacing: 3), GridItem(.fixed(cell), spacing: 3)],
-            spacing: 3
-        ) {
-            ForEach(Array(members.prefix(4).enumerated()), id: \.element.id) { index, item in
-                PinThumbnail(item: item, image: thumbnails[item.id] ?? nil, side: cell)
+    /// 成员缩略图排成一条，最多四张。
+    ///
+    /// 格子边长同时受宽和高两头约束：宽度按整宽均分，高度要留得下标题行和
+    /// 底栏——出现 AI 回答时卡片会变矮，只按宽度算的话缩略图会把底栏顶出
+    /// 卡外。48pt 封顶是因为成员少的时候（两三张）均分会得到七八十点的
+    /// 大图，那就不是"文件夹里有什么"，而是一张贴歪了的大图。
+    private var memberStrip: some View {
+        let shown = Array(members.prefix(4))
+        let spacing: CGFloat = 4
+        let byWidth = (PinCard.width - 16 - spacing * CGFloat(max(0, shown.count - 1)))
+            / CGFloat(max(1, shown.count))
+        let cell = max(20, min(48, byWidth))
+        // 竖着把剩下的高度吃满：标题行、底栏、两道 7pt 间距、上下 8pt 内边距
+        // 加起来占 64pt，其余全归缩略图。锁死正方形的那一版，卡片下半截空出
+        // 一条横带，看着像没做完；而这些内容（小红书笔记、文档截图）本来就是
+        // 竖的，格子竖起来反而露得更多。
+        let box = max(cell, min(64, frontHeight - 64))
+        return HStack(spacing: spacing) {
+            ForEach(shown) { item in
+                // 折叠脸上不画来源应用角标：37pt 的格子里那枚 16pt 徽标要占
+                // 掉近两成面积，四张排在一起就是四个亮点在抢戏。想知道某一张
+                // 从哪来，展开看成员卡。
+                PinThumbnail(
+                    item: item,
+                    image: thumbnails[item.id] ?? nil,
+                    side: cell,
+                    boxHeight: box,
+                    showsSourceBadge: false
+                )
             }
+            Spacer(minLength: 0)
         }
-        .frame(width: side, height: side, alignment: .topLeading)
+        .frame(height: box)
         .task(id: members.map(\.id)) { await loadThumbnails() }
     }
 
-    private var memberSummary: String {
-        members.prefix(4).map(\.title).joined(separator: "、")
-    }
 
     private func loadThumbnails() async {
         for item in members.prefix(4) where thumbnails[item.id] == nil {
@@ -4490,16 +4562,20 @@ private struct VersionAccordion: View {
                     // 卡片底色是 6.5% 的白——几乎全透明。不垫一层不透明底的话，
                     // 后面每一张都会整个从前面那张身上透出来，看到的是三层文字
                     // 叠在一起。堆叠要成立，前面那张必须真的挡住后面。
-                    .fill(Style.ink)
-                    // 纸边上色。中性灰的边压在近黑的面板上，对比只有几个百分点，
-                    // 眼睛读不出"这里叠着东西"。用强调色，而且和底栏那枚"N 版"
-                    // 是同一个色——两处说的本来就是同一件事。
+                    //
+                    // 垫的是面板材质本身（liquid）而不是纯黑：工作台换成玻璃
+                    // 之后，纯黑比台面上任何东西都深，一摞纸读起来像挖穿了。
+                    .fill(Style.liquid)
+                    // 纸边靠亮度分层，不靠颜色：越靠后越暗，像压在下面的纸接受
+                    // 的光更少。之前给纸边刷强调色（0.15 / 0.10）+ 描一圈 41%
+                    // 的橙边，结果后面两张比最上面那张还亮，层次是倒的；三条
+                    // 橙边套在一起也盖过了卡片自己的内容。
                     .overlay {
-                        sheetShape.fill(Style.accent.opacity(0.2 - Double(depth) * 0.05))
+                        sheetShape.fill(Color.white.opacity(0.045 - Double(depth) * 0.012))
                     }
                     .overlay {
                         sheetShape.strokeBorder(
-                            Style.accent.opacity(0.55 - Double(depth) * 0.14),
+                            Style.hairline.opacity(1 - Double(depth) * 0.34),
                             lineWidth: 1
                         )
                     }
@@ -4516,16 +4592,21 @@ private struct VersionAccordion: View {
                 versionSlot: slot(rank: 1)
             )
             // 同理：最上面那张也要有不透明底，否则纸边照样从它身上透出来。
-            .background { sheetShape.fill(Style.ink) }
-            // 最上面这张也描一道同色的边，整摞才是一个整体，而不是"一张卡
-            // 旁边贴了两条橙色"。
+            .background { sheetShape.fill(Style.liquid) }
+            // 静止时不额外描边——PinCard 自己那圈中性边已经在那儿了，再描
+            // 一圈同位置的只是把它加粗。橙色留到悬停：那一刻它要回答的是
+            // "我正要点开的是这一摞"，静止时"有几版"由底栏那枚 N 版 说。
             .overlay {
                 sheetShape.strokeBorder(
-                    Style.accent.opacity(hovering ? 0.6 : 0.38),
+                    hovering ? Style.accent.opacity(0.5) : .clear,
                     lineWidth: 1
                 )
             }
-            .shadow(color: Color.black.opacity(0.45), radius: 7, x: 3)
+            .shadow(
+                color: .black.opacity(hovering ? 0.34 : 0.24),
+                radius: hovering ? 10 : 6,
+                y: hovering ? 4 : 2
+            )
         }
         // 整摞的宽度 = 一张卡 + 探出来的那两条边，不会挤到隔壁。
         //
@@ -4957,6 +5038,9 @@ private struct PinThumbnail: View {
     /// 缩略图边长。文字卡片已经不再要缩略图，媒体卡片改用 48pt——
     /// 省下的 14pt 全给标题栏，两行标题不再一上来就被截断。
     var side: CGFloat = 62
+    /// 格子高度。分组折叠脸上的缩略图是**竖**的：那一栏的高度由卡片剩下多少
+    /// 空间决定，锁死正方形就会在下面留一条二三十点的横带。nil = 正方形。
+    var boxHeight: CGFloat?
     /// 右下角已经被品牌 / 平台徽标占了吗。
     ///
     /// 两个角标是各画各的：来源应用角标在缩略图内部，品牌徽标由外层 ZStack
@@ -4965,6 +5049,9 @@ private struct PinThumbnail: View {
     /// 让来源应用角标让位到左下角：品牌徽标是可点的、也更需要被认出来，
     /// 而"从哪个应用来的"退一格仍然看得见。
     var cornerIsTaken = false
+    /// 画不画来源应用角标。分组折叠脸上的小格子不画——格子只有 37pt，
+    /// 一枚 16pt 的徽标要吃掉近两成面积，四张排一起就是四个亮点在抢戏。
+    var showsSourceBadge = true
 
     var body: some View {
         Group {
@@ -4988,13 +5075,13 @@ private struct PinThumbnail: View {
                     .foregroundStyle(tint)
             }
         }
-        .frame(width: side, height: side)
+        .frame(width: side, height: boxHeight ?? side)
         .background(Style.surfacePressed, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay { RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Style.stroke) }
         // 角标压在缩略图角上，不参与裁剪，所以放在 clipShape 之后。
         .overlay(alignment: cornerIsTaken ? .bottomLeading : .bottomTrailing) {
-            if let icon = SourceAppBadge.icon(for: item) {
+            if showsSourceBadge, let icon = SourceAppBadge.icon(for: item) {
                 // 应用图标本身是圆角方形。之前把它摆在一个圆形底上，四个角
                 // 支出来、又多一圈描边，边缘就乱了。裁成圆形、只留一圈深色
                 // 分隔环，压在缩略图上才干净。

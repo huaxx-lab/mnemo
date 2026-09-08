@@ -201,6 +201,10 @@ public enum LinkTextExtraction {
             "无法获取内容",
             "Loading...",
             "Loading…",
+            // B 站风控降级页的标题。它长得像一句正经文案，所以更要显式拒掉：
+            // 不拦的话它会被当成"网页自己给的标题"写进卡片，还把 titleOrigin
+            // 标成 page，看起来就是抓成功了。
+            "视频内容待识别",
         ].contains(value)
     }
 

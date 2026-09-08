@@ -62,7 +62,15 @@
 
 ## 安装
 
-从 [Releases](https://github.com/huaxx-lab/mnemo/releases) 下载 `Mnemo-x.x.dmg`，拖进 Applications。首次打开右键 → 打开（自签名包，系统会多问一次）。
+从 [Releases](https://github.com/huaxx-lab/mnemo/releases) 下载 `Mnemo-x.x.dmg`，拖进 Applications。
+
+首次打开会被系统拦下——自签名包，没有经过 Apple 公证。放行的步骤是：
+
+1. 先双击一次，**让它被拒**（这一步不能省，系统要先记下一次拦截）
+2. 打开 **系统设置 → 隐私与安全性**，拉到最底下
+3. 会出现一行「已阻止使用“Mnemo”…」，点 **仍要打开**
+
+> 旧版教程里的「右键 → 打开」在 macOS 15 之后已经失效，Apple 移除了那条绕过路径，现在只能走系统设置。
 
 ## 自己构建
 

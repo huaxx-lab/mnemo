@@ -62,7 +62,15 @@ Every shortcut is remappable in Settings.
 
 ## Install
 
-Grab `Mnemo-x.x.dmg` from [Releases](https://github.com/huaxx-lab/mnemo/releases) and drop it into Applications. On first launch, right-click → Open (it's a self-signed build, so macOS asks once).
+Grab `Mnemo-x.x.dmg` from [Releases](https://github.com/huaxx-lab/mnemo/releases) and drop it into Applications.
+
+macOS blocks it on first launch — the build is self-signed and not notarized by Apple. To let it through:
+
+1. Double-click once and **let it be refused** (don't skip this; the system has to record the block first)
+2. Open **System Settings → Privacy & Security**, scroll to the bottom
+3. A line reading `"Mnemo" was blocked...` appears — click **Open Anyway**
+
+> The old `right-click → Open` trick no longer works: Apple removed that bypass in macOS 15, so System Settings is now the only route.
 
 ## Build from source
 

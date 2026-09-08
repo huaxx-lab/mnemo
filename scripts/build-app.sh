@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # 把 SwiftPM 可执行文件组装成 Mnemo.app。
 #
-# 自用场景不做签名公证，只做 ad-hoc 签名——足够本机运行，
-# 也避免每次构建都要开发者账号。
+# 自用场景不做公证，也不需要开发者账号。签名优先用本机自签证书
+# （见下面 SIGN_ID 那段：这是为了重编之后辅助功能授权不被收回），
+# 没有证书时退回 ad-hoc。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -124,9 +125,30 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-echo "▸ ad-hoc 签名"
+# 优先用本机自签证书，退回 ad-hoc。
+#
+# 差别不在"安全"，在**授权还在不在**。TCC 存的是一条指定要求（DR），每次拿
+# 运行中的进程去匹配；匹配上了，之前授过的辅助功能就还算数。
+#
+# ad-hoc 没有证书，codesign 手上只有代码本身，只能把 DR 写成
+# `cdhash H"..."`——钉死在这一次编译的产物上。于是每重编一次就是一个新身份，
+# 辅助功能授权被收回，开发期每次都要重新去系统设置里点一遍。
+#
+# 换成证书之后 DR 变成 `identifier "com.pinland.app" and certificate leaf H"..."`：
+# bundle id 本来就钉死（见开头那段），证书也不动，DR 就恒定，授权一次管到底。
+#
+# 证书自己签就行，不需要 Apple 账号：钥匙串访问 → 证书助理 → 创建证书，
+# 类型选「代码签名」、自签名根证书，有效期拉到 3650 天（过期同样会失配）。
+SIGN_ID="${MNEMO_SIGN_ID:-Mnemo Local Dev}"
 xattr -cr "$APP" 2>/dev/null || true
-codesign --force --deep --sign - "$APP"
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "$SIGN_ID"; then
+  echo "▸ 签名（$SIGN_ID）"
+  codesign --force --deep --sign "$SIGN_ID" "$APP"
+else
+  echo "▸ ad-hoc 签名（没找到「$SIGN_ID」证书；每次重编都会重新要授权）"
+  codesign --force --deep --sign - "$APP"
+fi
+echo "   指定要求：$(codesign -d -r- "$APP" 2>&1 | sed -n 's/^# designated => //p')"
 
 echo "▸ 拷回 build/"
 mkdir -p "$(dirname "$FINAL_APP")"

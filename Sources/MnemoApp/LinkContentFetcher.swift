@@ -43,10 +43,24 @@ enum LinkContentFetcher {
            let jsonURL = SiteContentExtraction.Discourse.topicJSONURL(for: url) {
             var jsonRequest = request
             jsonRequest.url = jsonURL
-            if let (data, _) = await load(jsonRequest),
+            if case .ok(let data, _) = await load(jsonRequest),
                let extracted = SiteContentExtraction.Discourse.extract(fromTopicJSON: data) {
                 return extracted
             }
+        }
+        // B 站：视频页刮不出东西（匿名常拿到「视频内容待识别」那张降级页），
+        // 官方 view 接口才是权威出口。放在小红书前面，两者互不相干。
+        if let apiURL = SiteContentExtraction.Bilibili.videoAPIURL(for: url) {
+            var apiRequest = request
+            apiRequest.url = apiURL
+            apiRequest.setValue("application/json", forHTTPHeaderField: "Accept")
+            // 站内 Referer 是这个接口的硬要求，缺了同样吃 412。
+            apiRequest.setValue("https://www.bilibili.com/", forHTTPHeaderField: "Referer")
+            if case .ok(let data, _) = await load(apiRequest),
+               let extracted = SiteContentExtraction.Bilibili.extract(fromViewJSON: data) {
+                return extracted
+            }
+            // 接口临时失败才退回通用网页路径，不在这里放弃。
         }
         // 小红书：标题、正文、配图都从同一条 noteDetailMap[id] 记录一次解出。
         // 不再对同一份 HTML 独立扫三遍“第一个同名字段”——页面里还有推荐流、
@@ -99,7 +113,7 @@ enum LinkContentFetcher {
            let jsonURL = SiteContentExtraction.Discourse.topicJSONURL(for: url) {
             var jsonRequest = standardRequest(for: jsonURL)
             jsonRequest.setValue("application/json", forHTTPHeaderField: "Accept")
-            if let (data, response) = await load(jsonRequest),
+            if case .ok(let data, let response) = await load(jsonRequest),
                let extracted = SiteContentExtraction.Discourse.extract(fromTopicJSON: data) {
                 return Fetched(
                     title: extracted.title,
@@ -113,7 +127,11 @@ enum LinkContentFetcher {
         }
 
         var request = standardRequest(for: url)
-        guard let (data, response) = await load(request) else { return nil }
+        var outcome = await load(request)
+        // 被风控挡下来才换真浏览器。B 站的 412 就是撞在这里——之前它和 404
+        // 一样直接放弃，于是"抓不到封面"，而页面其实好好地在那儿。
+        if case .blocked = outcome { outcome = await renderedFallback(for: url) }
+        guard case .ok(let data, let response) = outcome else { return nil }
         let finalURL = response.url ?? url
         let mime = (response.mimeType ?? "").lowercased()
 
@@ -248,8 +266,20 @@ enum LinkContentFetcher {
     /// 让我们等一会儿。这条路径跑在后台索引里，等几秒不挡任何交互。
     private static let rateLimitRetries = 2
 
-    private static func load(_ request: URLRequest, attempt: Int = 0) async -> (Data, URLResponse)? {
-        guard let url = request.url else { return nil }
+    /// 一次抓取的结局。
+    ///
+    /// 之前只有"有内容 / nil"两种，于是 412 和 404 长得一模一样——用户看到的
+    /// 都是"抓不到封面"，而这两件事该走完全不同的处置。
+    private enum LoadOutcome {
+        case ok(Data, URLResponse)
+        /// 被风控挡下（412 / 403）。和"没有这个东西"不是一回事：东西在，
+        /// 只是它不认我们这个来路，值得换条路再来一次。
+        case blocked
+        case failed
+    }
+
+    private static func load(_ request: URLRequest, attempt: Int = 0) async -> LoadOutcome {
+        guard let url = request.url else { return .failed }
         // 租约覆盖“发请求 + 把响应流读完”整个周期，不只是错开发车时刻。
         let lease = await LinkFetchScheduler.acquire(for: url)
         let loaded: (Data, URLResponse)?
@@ -267,7 +297,7 @@ enum LinkContentFetcher {
             loaded = nil
         }
         await LinkFetchScheduler.release(lease)
-        guard let (data, response) = loaded else { return nil }
+        guard let (data, response) = loaded else { return .failed }
         if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
             // 429 / 503 是“稍后再来”，不是“没有这个东西”。重试会重新排队，
             // 不会在等待 Retry-After 时霸占全局通道。
@@ -275,12 +305,39 @@ enum LinkContentFetcher {
                 let advised = http.value(forHTTPHeaderField: "Retry-After").flatMap(Double.init)
                 let wait = min(max(advised ?? Double(attempt + 1) * 3, 1), 15)
                 try? await Task.sleep(for: .seconds(wait))
-                guard !Task.isCancelled else { return nil }
+                guard !Task.isCancelled else { return .failed }
                 return await load(request, attempt: attempt + 1)
             }
-            return nil
+            // 412 / 403 单独报出去，上层才有机会换 WebKit 再来一次。
+            // 混进 failed 里就只剩一句"抓不到"，线索全丢了。
+            if [412, 403].contains(http.statusCode) { return .blocked }
+            return .failed
         }
-        return (data, response)
+        return .ok(data, response)
+    }
+
+    /// 被风控挡下之后的第二条路：让 WebKit 真去访问一次。
+    ///
+    /// 请求头装得再像也有尽头。URLSession 走的是系统网络栈，TLS ClientHello
+    /// 和 HTTP/2 SETTINGS 那一层的指纹和 Safari 对不上，这不是请求头能补的
+    /// 差距——`BrowserRequestHeaders` 的注释里已经把这条界线划清楚了。而
+    /// WKWebView 就是真的 WebKit：指纹天生是对的，JS 跑得起来，Cookie 也按
+    /// 站点自己的规矩种上。对付指纹级风控，正解不是"模仿浏览器"，是**直接用
+    /// 浏览器**——这个部件我们一直有，只是从来没接到这条路上。
+    ///
+    /// 只在被拦之后才走：起一个 WebKit 进程是秒级开销，常规站点不该付这个价。
+    private static func renderedFallback(for url: URL) async -> LoadOutcome {
+        guard let html = await HeadlessPageRenderer.renderedHTML(of: url),
+              let data = html.data(using: .utf8) else { return .failed }
+        // 后面的解码和抽取只用到 url / mimeType / textEncodingName，
+        // 拼一个 URLResponse 就够，不必伪造一整个 HTTPURLResponse。
+        let response = URLResponse(
+            url: url,
+            mimeType: "text/html",
+            expectedContentLength: data.count,
+            textEncodingName: "utf-8"
+        )
+        return .ok(data, response)
     }
 
     /// 按响应声明的编码解码；没声明就先试 UTF-8，再试 GB18030。

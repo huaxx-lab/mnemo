@@ -95,6 +95,61 @@ public enum SiteContentExtraction {
     ///
     /// meta description 也有一份，但会被截断（实测 206 字 vs 432 字），而且
     /// 丢掉了换行。这里优先取完整的那份，取不到再由通用的 meta 兜底。
+    /// B 站视频页。
+    ///
+    /// 视频页是纯前端渲染的，还带风控：匿名请求经常拿到一张降级页——`<title>`
+    /// 是「视频内容待识别」这类占位，配图是站点 logo。那份 HTML 怎么刮都刮不出
+    /// 真标题，因为里面根本就没有。
+    ///
+    /// 官方 web 接口 `x/web-interface/view` 是这条链上唯一的权威出口：实测只要
+    /// 带正常浏览器 UA + 站内 Referer 就返回 200，**不需要任何 Cookie，也不需要
+    /// WBI 签名**，`data.title` / `data.desc` 就是页面上那两样东西。和 linux.do
+    /// 走 Discourse JSON 同理——站点自己的结构化出口永远比刮 HTML 可靠。
+    public enum Bilibili {
+        /// 视频页的形状：`/video/BV1xx411c7mD`，后面可带分 P 参数。
+        /// 短链 `b23.tv/xxx` 会先跳转，走到这里时已经是最终 URL。
+        public static func videoAPIURL(for url: URL) -> URL? {
+            guard let host = url.host?.lowercased(),
+                  host == "bilibili.com" || host.hasSuffix(".bilibili.com") else { return nil }
+            let parts = url.path.split(separator: "/", omittingEmptySubsequences: true)
+            guard parts.count >= 2, parts[0] == "video" else { return nil }
+            let id = String(parts[1])
+            var components = URLComponents(string: "https://api.bilibili.com/x/web-interface/view")
+            // BV 号是现制，av 号是旧制但老链接里仍然大量存在，两种都收。
+            if id.lowercased().hasPrefix("bv") {
+                components?.queryItems = [URLQueryItem(name: "bvid", value: id)]
+            } else if id.lowercased().hasPrefix("av"), let aid = Int(id.dropFirst(2)) {
+                components?.queryItems = [URLQueryItem(name: "aid", value: String(aid))]
+            } else {
+                return nil
+            }
+            return components?.url
+        }
+
+        /// 解析 `x/web-interface/view` 的响应。
+        ///
+        /// `code != 0` 时 `data` 是空的（稿件不存在、被删、仅登录可见），这时候
+        /// 必须返回 nil 让上层退回通用路径——绝不能把 `message` 当标题写进去，
+        /// 那是又一个"平台通用文案顶掉真标题"的坑。
+        public static func extract(fromViewJSON data: Data) -> LinkTextExtraction.Extracted? {
+            guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  (root["code"] as? Int) == 0,
+                  let payload = root["data"] as? [String: Any],
+                  let title = (payload["title"] as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !title.isEmpty else { return nil }
+            // 简介经常是空的或者就一个 "-"，那种不值得当正文喂进 RAG。
+            let description = (payload["desc"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let body = description.count > 1 ? LinkTextExtraction.normalize(description) : ""
+            return LinkTextExtraction.Extracted(
+                title: title,
+                text: body,
+                summary: body.isEmpty ? nil : body
+            )
+        }
+    }
+
     public enum Xiaohongshu {
         /// 小红书登录墙的稳定指纹。至少命中两项才判定，避免普通正文恰好
         /// 提到“登录”或“隐私政策”就被误杀。
