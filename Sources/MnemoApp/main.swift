@@ -49,6 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let model = AppModel()
     private let providerSettings = ProviderSettingsModel()
     private var anchorPanel: NotchAnchorPanel!
+    private var focusIslandPanel: FocusIslandPanel!
     private var dragReceiverPanel: NotchDragReceiverPanel!
     private var workspacePanel: NotchWorkspacePanel!
     private var detailPanel: NotchDetailPanel!
@@ -366,6 +367,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func anchorMetrics() -> NotchAnchorLayoutMetrics {
         NotchLayout.anchorMetrics(
             for: model.barState,
+            isDocked: model.isFocusTimerDockedInNotch,
             suggestionCount: model.contextSuggestions.count,
             supplement: model.notchSupplement,
             supplementActionCount: model.notchSupplementActionCount
@@ -381,6 +383,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             height: size.height
         )
     }
+
+    private func focusIslandFrame() -> CGRect {
+        // 宽度 170，高度 32，原点设在 notchRect.maxX - 20。
+        // 胶囊位于窗口内 localX = 68 处，向左滑动滑入刘海（localX 20）全程在窗口正坐标内，彻底杜绝掉帧与闪烁！
+        let w: CGFloat = 170
+        let h: CGFloat = max(32, notchRect.height)
+        let x = notchRect.maxX - 20
+        let y = screenFrame.maxY - h
+        return CGRect(x: x, y: y, width: w, height: h)
+    }
+
     private func dragReceiverFrame() -> CGRect { windowGeometry.dragReceiverFrame }
     private func workspaceFrame() -> CGRect { windowGeometry.workspaceFrame }
 
@@ -390,7 +403,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             rootView: NotchAnchorRootView(model: model),
             openAction: { [weak self] in
                 guard let self, self.model.expandTrigger.allowsClick else { return }
-                self.model.expand()
+                self.model.togglePanel()
             }
         )
         // NSHostingView 默认会把自己的理想尺寸反推给宿主窗口。锚点的窗口大小
@@ -513,6 +526,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         anchorPanel.contentView = anchorHost
 
+        focusIslandPanel = FocusIslandPanel(contentRect: focusIslandFrame())
+        let islandHost = FocusIslandHostingView(rootView: FocusIslandView(model: model))
+        islandHost.sizingOptions = []
+        islandHost.capsuleHitRect = {
+            // 胶囊位于 localX = 20 + 48 = 68 处，尺寸 90×32。
+            // 只有胶囊本体响应点击与手势，左侧 0..66 的所有空隙区域 100% 返回 nil 透传菜单栏，零死区！
+            CGRect(x: 64, y: 0, width: 92, height: 32)
+        }
+        focusIslandPanel.contentView = islandHost
+
         dragReceiverPanel = NotchDragReceiverPanel(contentRect: dragReceiverFrame())
         dragReceiverPanel.contentView = NotchDragReceiverView(model: model)
 
@@ -532,6 +555,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func positionStablePanels() {
         anchorPanel.setFrame(anchorFrame(), display: true)
+        if model.focusTimer.phase != .idle {
+            focusIslandPanel.setFrame(focusIslandFrame(), display: true)
+        }
         dragReceiverPanel.setFrame(dragReceiverFrame(), display: true)
         workspacePanel.setFrame(workspaceFrame(), display: true)
         detailPanel.setFrame(detailFrame(), display: true)
@@ -597,6 +623,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             detailPanel.setFrame(detailFrame(), display: true)
         }
 
+        let isFocusing = model.focusTimer.phase != .idle
+        let showDetachedIsland = isFocusing && !model.isFocusTimerDockedInNotch
+        if showDetachedIsland {
+            let islandTarget = focusIslandFrame()
+            if focusIslandPanel.frame != islandTarget {
+                focusIslandPanel.setFrame(islandTarget, display: true)
+            }
+            if !focusIslandPanel.isVisible {
+                focusIslandPanel.orderFrontRegardless()
+            }
+        } else {
+            if focusIslandPanel.isVisible {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                    guard let self, (self.model.focusTimer.phase == .idle || self.model.isFocusTimerDockedInNotch) else { return }
+                    self.focusIslandPanel.orderOut(nil)
+                }
+            }
+        }
+
         // 幂等：只在结论真的变了的时候动窗口，所以可以被高频反复调用。
         guard plan != appliedPlan else { return }
         appliedPlan = plan
@@ -630,6 +675,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             _ = model.activeReminder
             _ = model.mode
             _ = model.detailItem?.id
+            _ = model.focusTimer.phase
+            _ = model.timerRemaining
+            _ = model.isFocusTimerDockedInNotch
         } onChange: { [weak self] in
             MainActor.assumeIsolated {
                 guard let self else { return }
@@ -753,6 +801,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // 独立悬浮胶囊由自己的手势处理展开与收回（toggle），不在这里作为"外部点击"误判
+        if ownWindow === focusIslandPanel { return }
+
         // 只有工作台自己那一块算"里面"。
         //
         // 预览窗**不算**。它是一个独立窗口，自带关闭键，还能被拖到屏幕中间、
@@ -796,7 +847,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// 我们自己的**独立**窗口。它们不属于工作台，点它们该收起工作台。
     private var standaloneWindows: [NSWindow] {
-        [anchorPanel, dragReceiverPanel, detailPanel, settingsWindow, onboardingWindow]
+        [anchorPanel, focusIslandPanel, dragReceiverPanel, detailPanel, settingsWindow, onboardingWindow]
             .compactMap { $0 }
     }
 

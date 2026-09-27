@@ -152,6 +152,28 @@ final class NotchDetailPanel: NSPanel {
     override func cancelOperation(_ sender: Any?) { onCancel?() }
 }
 
+
+/// 专注时独立悬浮在刘海右侧的灵动岛计时胶囊窗口。
+final class FocusIslandPanel: NSPanel {
+    init(contentRect: NSRect) {
+        super.init(
+            contentRect: contentRect,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        configureNotchSurface(
+            level: NSWindow.Level(rawValue: NSWindow.Level.mainMenu.rawValue + 4),
+            shadow: false
+        )
+        becomesKeyOnlyIfNeeded = false
+        acceptsMouseMovedEvents = true
+    }
+
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+}
+
 private final class DetailPanelSizeKeeper: NSObject, NSWindowDelegate {
     /// 拉过、挪过都记下来，下次打开还是那个样子、那个位置。
     func windowDidEndLiveResize(_ notification: Notification) { remember(notification) }

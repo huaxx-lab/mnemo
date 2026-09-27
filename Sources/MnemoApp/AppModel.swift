@@ -2080,6 +2080,10 @@ final class AppModel {
         setMode(horizontalDirection < 0 ? .focus : .stash)
     }
 
+    var isFocusIslandRetracting: Bool = false
+    /// 是否已通过从右向左滑动收回刘海内显示计时（和最早的时候一样）
+    var isFocusTimerDockedInNotch: Bool = false
+
     func expand() {
         notchPresentation.requestOpen()
     }
@@ -4279,6 +4283,7 @@ final class AppModel {
     }
 
     func startFocus() {
+        isFocusTimerDockedInNotch = false
         focusTimer.start(duration: TimeInterval(focusDurationMinutes * 60))
         refreshFocusTimer()
     }
@@ -4292,9 +4297,36 @@ final class AppModel {
         refreshFocusTimer()
     }
 
-    func cancelFocus() {
+    /// 结束/取消专注。未完成但实际专注时长达到 5 分钟（300 秒）的，同样如实记录。
+    func cancelFocus(now: Date = .now) {
+        isFocusTimerDockedInNotch = false
+        let startedAt = focusTimer.startedAt
+        let plannedDuration = focusTimer.duration
+        let remaining = focusTimer.remaining(at: now) ?? (timerRemaining ?? plannedDuration)
+        let elapsed = max(0, plannedDuration - remaining)
+
         focusTimer.cancel()
         timerRemaining = nil
+
+        // 只要超过 5 分钟（300 秒），哪怕用户主动提前结束，也记入专注记录
+        if elapsed >= 5 * 60, let startedAt {
+            feedbackMessage = "已记录 \(Int(elapsed / 60)) 分钟专注"
+            let session = FocusSession(
+                startedAt: startedAt,
+                completedAt: now,
+                plannedDuration: elapsed
+            )
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    try await library.recordFocusSession(session)
+                    focusSessions.insert(session, at: 0)
+                    focusHeatmap = FocusHistory.summaries(sessions: focusSessions, days: 91)
+                } catch {
+                    lastError = "保存专注记录失败：\(error.localizedDescription)"
+                }
+            }
+        }
     }
 
     func refreshFocusTimer(now: Date = .now) {
@@ -4302,6 +4334,7 @@ final class AppModel {
         let plannedDuration = focusTimer.duration
         if focusTimer.settle(now: now) {
             timerRemaining = nil
+            isFocusTimerDockedInNotch = false
             feedbackMessage = "专注完成"
             showEdgeStatus(.focusCompleted)
             if let startedAt {

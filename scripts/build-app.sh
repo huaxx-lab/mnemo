@@ -141,11 +141,11 @@ PLIST
 # 类型选「代码签名」、自签名根证书，有效期拉到 3650 天（过期同样会失配）。
 SIGN_ID="${MNEMO_SIGN_ID:-Mnemo Local Dev}"
 xattr -cr "$APP" 2>/dev/null || true
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "$SIGN_ID"; then
-  echo "▸ 签名（$SIGN_ID）"
-  codesign --force --deep --sign "$SIGN_ID" "$APP"
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "${SIGN_ID}"; then
+  echo "▸ 签名（${SIGN_ID}）"
+  codesign --force --deep --sign "${SIGN_ID}" "$APP"
 else
-  echo "▸ ad-hoc 签名（没找到「$SIGN_ID」证书；每次重编都会重新要授权）"
+  echo "▸ ad-hoc 签名（没找到「${SIGN_ID}」证书；每次重编都会重新要授权）"
   codesign --force --deep --sign - "$APP"
 fi
 echo "   指定要求：$(codesign -d -r- "$APP" 2>&1 | sed -n 's/^# designated => //p')"

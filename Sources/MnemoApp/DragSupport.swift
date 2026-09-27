@@ -243,6 +243,22 @@ final class NotchAnchorHostingView<Content: View>: NSHostingView<Content> {
     }
 }
 
+/// 专用于独立悬浮胶囊的透明宿主视图：精准命中测试，剔除刘海与胶囊之间的空隙，保证系统菜单栏图标畅通点击无死区。
+@MainActor
+final class FocusIslandHostingView<Content: View>: NSHostingView<Content> {
+    var capsuleHitRect: () -> CGRect = { .zero }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let local = superview.map { convert(point, from: $0) } ?? point
+        // 只有点在胶囊真正几何区域内才响应，其余所有空隙区域 100% 返回 nil 透传菜单栏！
+        let rect = capsuleHitRect()
+        if rect.contains(local) {
+            return super.hitTest(point) ?? self
+        }
+        return nil
+    }
+}
+
 /// Dedicated AppKit dragging destination. The panel is normally mouse-transparent
 /// and is armed only during an active drag near the notch.
 @MainActor

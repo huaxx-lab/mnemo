@@ -97,19 +97,13 @@ enum NotchLayout {
     ///   不往下掉一个面板——为一条结果弹个抽屉太重了。
     /// - 两条以上：两翼只留"库里有 N 个"和关闭，候选竖着排在刘海下面。
     ///   横向摊开三条会宽得离谱。
-    static func wingWidth(for state: AppModel.BarState, suggestionCount: Int = 1) -> CGFloat {
+    static func wingWidth(for state: AppModel.BarState, isDocked: Bool = false, suggestionCount: Int = 1) -> CGFloat {
         switch state {
         case .idle: 0
+        case .timing, .paused: isDocked ? 56 : 0
         case .indexing, .syncing: 38
         case .dropTargeted: 42
-        case .timing, .paused: 56
-        // 往两侧长要有节制：刘海居中，长太宽就压到菜单栏右侧的应用图标上。
-        // 竖排时行本身有整宽可用，两翼只需要放下"库里有 N 个"和关闭。
-        // 推荐本身在下面整宽的行里，两翼只放一个状态图标和关闭，
-        // 因此不需要很宽——长出去的每一点都压在菜单栏图标上。
         case .suggesting: 44
-        // 候选卡和提醒卡的正文都在下面整宽的卡片里，两翼只放一个状态图标，
-        // 和推荐保持同一个克制尺度。
         case .todoDraft: 42
         case .reminding: 46
         }
@@ -120,12 +114,14 @@ enum NotchLayout {
 
     static func anchorMetrics(
         for state: AppModel.BarState,
+        isDocked: Bool = false,
         suggestionCount: Int = 1
     ) -> NotchAnchorLayoutMetrics {
-        NotchAnchorLayoutMetrics(
+        let lipHeight: CGFloat = (state == .timing || state == .paused || state == .idle) ? 0 : clickLipHeight
+        return NotchAnchorLayoutMetrics(
             notchSize: CGSize(width: notchWidth, height: notchHeight),
-            wingWidth: wingWidth(for: state, suggestionCount: suggestionCount),
-            clickLipHeight: clickLipHeight,
+            wingWidth: wingWidth(for: state, isDocked: isDocked, suggestionCount: suggestionCount),
+            clickLipHeight: lipHeight,
             suggestionRowHeight: suggestionRowHeight,
             suggestionListPadding: suggestionListPadding,
             suggestionCount: state == .suggesting ? suggestionCount : 0,
@@ -151,13 +147,15 @@ enum NotchLayout {
 
     static func anchorMetrics(
         for state: AppModel.BarState,
+        isDocked: Bool = false,
         suggestionCount: Int,
         supplement: AppModel.NotchSupplement,
         supplementActionCount: Int = 0
     ) -> NotchAnchorLayoutMetrics {
-        var metrics = anchorMetrics(for: state, suggestionCount: suggestionCount)
-        metrics.supplementalContentSize = supplementSize(supplement)
-        metrics.supplementalActionCount = supplementActionCount
+        let effectiveSupplement: AppModel.NotchSupplement = (state == .timing || state == .paused) ? .none : supplement
+        var metrics = anchorMetrics(for: state, isDocked: isDocked, suggestionCount: suggestionCount)
+        metrics.supplementalContentSize = supplementSize(effectiveSupplement)
+        metrics.supplementalActionCount = effectiveSupplement == .none ? 0 : supplementActionCount
         return metrics
     }
 
@@ -185,6 +183,142 @@ enum NotchLayout {
     /// 刘海占据的那一段：只有底色，内容从它下面开始。
     static var contentTopInset: CGFloat { notchHeight }
     static var shellHeight: CGFloat { notchHeight + workspaceHeight }
+}
+
+/// 专注时独立悬浮在刘海右侧的正统药丸胶囊（Capsule）。
+struct FocusIslandView: View {
+    @Bindable var model: AppModel
+    @State private var isHovered = false
+    @State private var isPressed = false
+    @State private var dragOffset: CGFloat = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    // 窗口原点设在 notchRect.maxX - 20，刘海右壁正好在窗口内 localX = 20
+    private let notchWallX: CGFloat = 20
+    private let floatingGap: CGFloat = 48
+
+    private var isFocusing: Bool {
+        model.focusTimer.phase != .idle
+    }
+
+    /// 专注进行中、未停靠进刘海、工作台收起、且未处于收缩阶段时展现
+    private var isPresented: Bool {
+        isFocusing && !model.isFocusTimerDockedInNotch && model.workspacePhase == .hidden && !model.isFocusIslandRetracting
+    }
+
+    private var isPaused: Bool {
+        model.focusTimer.phase == .paused
+    }
+
+    private var currentCapsuleX: CGFloat {
+        if isPresented {
+            return notchWallX + floatingGap + dragOffset
+        } else {
+            return notchWallX - 30
+        }
+    }
+
+    private var springAnimation: Animation {
+        isPresented
+            ? .spring(response: 0.36, dampingFraction: 0.70, blendDuration: 0.10)
+            : .smooth(duration: 0.14)
+    }
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 0) {
+            // 正统药丸胶囊（Capsule）：纯白高清晰倒计时，无任何多余图标
+            capsuleContent
+                .offset(x: currentCapsuleX)
+                .scaleEffect(
+                    x: isPresented ? (isPressed ? 0.95 : (isHovered ? 1.02 : 1.0)) : 0.15,
+                    y: isPresented ? (isPressed ? 0.95 : (isHovered ? 1.02 : 1.0)) : 0.55,
+                    anchor: .leading
+                )
+                .opacity(isPresented ? 1 : 0)
+                .blur(radius: isPresented ? 0 : 2.5)
+                .animation(reduceMotion ? nil : springAnimation, value: isPresented)
+                .animation(reduceMotion ? nil : .snappy(duration: 0.15), value: isHovered)
+                .animation(reduceMotion ? nil : .snappy(duration: 0.10), value: isPressed)
+
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+    }
+
+    private var capsuleContent: some View {
+        Text(formattedRemainingTime)
+            .font(.system(size: 14, weight: .bold, design: .rounded))
+            .monospacedDigit()
+            .foregroundStyle(isPaused ? Color(red: 1.0, green: 0.85, blue: 0.45) : Color.white)
+            .padding(.horizontal, 15)
+            .padding(.vertical, 5)
+            .frame(height: 31)
+            .background {
+                Capsule(style: .continuous)
+                    .fill(Color.black)
+                    .shadow(color: Color.black.opacity(0.48), radius: 6, x: 0, y: 1.5)
+            }
+            .overlay {
+                Capsule(style: .continuous)
+                    .strokeBorder(
+                        Color.white.opacity(isHovered ? 0.38 : 0.18),
+                        lineWidth: 0.6
+                    )
+            }
+            .scaleEffect(isPressed ? 0.95 : (isHovered ? 1.02 : 1.0))
+            .animation(.snappy(duration: 0.12), value: isPressed)
+            .animation(.snappy(duration: 0.15), value: isHovered)
+            .compositingGroup()
+            .contentShape(Capsule(style: .continuous))
+            .onHover { isHovered = $0 }
+            // 从右向左滑动收回刘海，轻点点击展开/收回工作台
+            .gesture(
+                DragGesture(minimumDistance: 3)
+                    .onChanged { value in
+                        if value.translation.width < 0 {
+                            dragOffset = value.translation.width
+                            isPressed = true
+                        }
+                    }
+                    .onEnded { value in
+                        isPressed = false
+                        if value.translation.width < -16 || value.predictedEndTranslation.width < -35 {
+                            // 从右向左滑动成功：平滑滑入刘海，并在刘海里显示计时（和最早的时候一样）
+                            withAnimation(.spring(response: 0.28, dampingFraction: 0.78)) {
+                                dragOffset = -65
+                                model.isFocusTimerDockedInNotch = true
+                            }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                dragOffset = 0
+                            }
+                        } else if abs(value.translation.width) < 5 && abs(value.translation.height) < 5 {
+                            // 轻触点击：展开或收回工作台
+                            model.togglePanel()
+                            dragOffset = 0
+                        } else {
+                            withAnimation(.spring(response: 0.28, dampingFraction: 0.75)) {
+                                dragOffset = 0
+                            }
+                        }
+                    }
+            )
+            .onTapGesture {
+                model.togglePanel()
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(
+                isPaused
+                    ? "专注已暂停，点击展开面板"
+                    : "专注进行中，剩余 \(formattedRemainingTime)，点击展开面板"
+            )
+    }
+
+    private var formattedRemainingTime: String {
+        let seconds = max(0, Int((model.timerRemaining ?? 0).rounded(.up)))
+        let m = seconds / 60
+        let s = seconds % 60
+        return String(format: "%d:%02d", m, s)
+    }
 }
 
 struct NotchAnchorRootView: View {
@@ -594,12 +728,15 @@ private struct CollapsedBar: View {
         // 不再在刘海下面单独长出一块——那才是"凭空多出一个区域"的来源。
         let wing = NotchLayout.wingWidth(
             for: model.barState,
+            isDocked: model.isFocusTimerDockedInNotch,
             suggestionCount: model.contextSuggestions.count
         )
-        let isQuiet = model.barState == .idle
+        let isFocusTiming = model.barState == .timing || model.barState == .paused
+        let isQuiet = model.barState == .idle || (isFocusTiming && !model.isFocusTimerDockedInNotch)
         let supplement = model.notchSupplement
         let metrics = NotchLayout.anchorMetrics(
             for: model.barState,
+            isDocked: model.isFocusTimerDockedInNotch,
             suggestionCount: model.contextSuggestions.count,
             supplement: supplement,
             supplementActionCount: model.notchSupplementActionCount
@@ -628,8 +765,10 @@ private struct CollapsedBar: View {
             //
             // 这条唇只负责展开，本身不画东西；可点性由宿主视图那层看不见的
             // 底色保证。有推荐时它落在整块黑里，是刘海到列表之间的连接段。
-            Color.clear
-                .frame(width: NotchLayout.notchWidth, height: NotchLayout.clickLipHeight)
+            if !isFocusTiming {
+                Color.clear
+                    .frame(width: NotchLayout.notchWidth, height: NotchLayout.clickLipHeight)
+            }
 
             if showsList {
                 VStack(spacing: 0) {
@@ -691,7 +830,11 @@ private struct CollapsedBar: View {
                 }
             }
         }
-        .frame(width: metrics.panelSize.width, height: metrics.panelSize.height, alignment: .top)
+        .frame(
+            width: metrics.panelSize.width,
+            height: isFocusTiming ? NotchLayout.notchHeight : metrics.panelSize.height,
+            alignment: .top
+        )
         // 交互底：刘海状态带必须始终收得到指针——点击展开靠它。铺一层 2% 的
         // 黑：肉眼分辨不出，窗口服务器却认它是非透明像素。
         //
@@ -711,7 +854,8 @@ private struct CollapsedBar: View {
             if !isQuiet {
                 shape.fill(Color.black)
                     .frame(
-                        height: showsList || supplement != .none
+                        width: NotchLayout.notchWidth + wing * 2,
+                        height: (showsList || supplement != .none) && !isFocusTiming
                             ? metrics.panelSize.height
                             : NotchLayout.notchHeight
                     )
@@ -796,13 +940,21 @@ private struct CollapsedBar: View {
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(Style.accent)
         case .timing:
-            Image(systemName: "timer")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Style.accent)
+            if model.isFocusTimerDockedInNotch {
+                Image(systemName: "timer")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Style.accent)
+            } else {
+                Color.clear
+            }
         case .paused:
-            Image(systemName: "pause.fill")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Style.warning)
+            if model.isFocusTimerDockedInNotch {
+                Image(systemName: "pause.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Style.warning)
+            } else {
+                Color.clear
+            }
         case .todoDraft:
             Image(systemName: model.todoDraftCameFromNearbyDevice
                   ? model.todoDraftDeviceKind.symbol : "checklist")
@@ -847,11 +999,26 @@ private struct CollapsedBar: View {
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Style.cool)
         case .timing, .paused:
-            Text(TimeFormat.mmss(model.timerRemaining ?? 0))
-                .font(.system(size: 11, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(Style.primary)
-                .contentTransition(.numericText())
+            if model.isFocusTimerDockedInNotch {
+                Text(TimeFormat.mmss(model.timerRemaining ?? 0))
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(Style.primary)
+                    .contentTransition(.numericText())
+                    // 从左向右轻滑刘海右翼，可将计时重新弹出为独立悬浮胶囊
+                    .gesture(
+                        DragGesture(minimumDistance: 8)
+                            .onEnded { value in
+                                if value.translation.width > 12 {
+                                    withAnimation(.spring(response: 0.35, dampingFraction: 0.72)) {
+                                        model.isFocusTimerDockedInNotch = false
+                                    }
+                                }
+                            }
+                    )
+            } else {
+                Color.clear
+            }
         case .todoDraft, .reminding:
             // 对号和叉都在下面那张卡上，两翼这里再放一个关闭只会有两个语义
             // 相同的按钮，用户永远在猜点哪个。
@@ -5239,10 +5406,19 @@ private struct FocusTimerColumn: View {
                     Image(systemName: "stop.fill")
                 }
                 .buttonStyle(SecondaryActionButtonStyle())
-                .help("结束本次专注，本次不计入记录")
+                .help(cancelActionHelp)
                 .accessibilityLabel("结束本次专注")
                 .transition(.opacity.combined(with: .scale(scale: 0.92)))
             }
+        }
+    }
+
+    private var cancelActionHelp: String {
+        let elapsed = max(0, model.focusTimer.duration - (model.timerRemaining ?? model.focusTimer.duration))
+        if elapsed >= 5 * 60 {
+            return "结束本次专注（已达 \(Int(elapsed / 60)) 分钟，将计入记录）"
+        } else {
+            return "结束本次专注（未满 5 分钟不计入记录）"
         }
     }
 
